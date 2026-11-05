@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.automats.lock
+.automats-state.json
+figures/
+results
+.DS_Store

@@ -1,0 +1,168 @@
+# baseline recipe to generate MATS verification plots/slides.
+#   sfc_dieoff:  t2m, td2m, wind10m, rmse+bias
+#   sfc_tseries: t2m, td2m, wind10m, rmse, bias, f000, f001, f012
+#   ua_dieoff:   T, RHobT, Wind, rmse+bias
+#   ua_profile:  T, RHobT, Wind, rmse+bias, f000, f001, f003, f006, f009, f012
+#   ua_tseries:  T, RHobT, Wind, rmse+bias, f001
+#   mrms_dieoff: cref, csi+freq, treshold25, threshold35, threshold45
+#
+
+experiments:
+- name: RRFSv2_conus_3km_ret_v2x_retv4
+  color: red
+- name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
+  color: blue
+- name: HRRR_OPS
+  color: orange
+#- name: RRFS_A
+#  color: "#5F5F5F"
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# detailed recipes
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+automation:
+  minimum waiting seconds: 3 
+  control waiting seconds: 0.3  # pesudo "mouse click" intervals, 300ms 
+  #base_url: "https://gsl.noaa.gov/int-mats"  # When the official MATS is down
+
+common:
+  #start and end dates are optional, if not specificed, use the first exp date range
+  #start: "2024-05-06T10:00:00Z"
+  #end: "2024-05-13T00:00:00Z"
+  line weight: 3
+  marker weight: 8
+
+plots:
+- name: sfc_dieoff
+  application: "surface"
+  truth: "METAR"
+  plot_type: dieoff
+  region: "All HRRR domain"
+  variable: [t2m, td2m, wind10m]
+  statistic: [rmse+bias]
+
+- name: sfc_tseries
+  application: "surface"
+  truth: "METAR"
+  plot_type: "time series"
+  region: "All HRRR domain"
+  variable: [t2m, td2m, wind10m]
+  statistic: [rmse, bias, rmse+bias]
+  forecast lead time: [0, 1, 12]
+  #Difference curves: "Diff all curves against the 1st added curve"
+
+- name: ua_dieoff
+  application: "Upper Air"
+  plot_type: dieoff
+  truth: "RAOBs (Traditional)"
+  region: "HRRR domain"
+  matched_samples: true
+  variable: [T, RHobT, Wind]
+  statistic: [rmse+bias]
+
+- name: ua_profile
+  application: "Upper Air"
+  plot_type: profile
+  truth: "RAOBs (Traditional)"
+  region: "HRRR domain"
+  matched_samples: true
+  variable: [T, RHobT, Wind]
+  statistic: [rmse+bias]
+  forecast lead time: [0, 1, 3, 6, 9, 12]
+
+- name: ua_tseries
+  application: "Upper Air"
+  plot_type: "time series"
+  truth: "RAOBs (Traditional)"
+  region: "HRRR domain"
+  matched_samples: true
+  variable: [T]
+  statistic: [rmse+bias]
+  forecast lead time: [1]
+
+- name: mrms_dieoff
+  application: "Radar (MRMS)"
+  plot_type: "die off"
+  region: "Continental US"
+  matched_samples: true
+  variable: ["Composite Reflectivity"]
+  Threshold: [25, 35, 45]
+  statistic: [CSI, Bias]
+
+
+slides:
+# -----  surface slides ------
+- plot group: sfc_dieoff
+  title: Surface Dieoff
+  number of rows: 2
+  row1: [t2m, td2m]
+  row2: [wind10m]
+
+- plot group: sfc_tseries
+  title: Surface Time Series RMSE f000h
+  number of rows: 2
+  row1: [t2m_rmse_f000, td2m_rmse_f000]
+  row2: [wind10m_rmse_f000]
+
+- plot group: sfc_tseries
+  title: Surface Time Series Bias f000h
+  number of rows: 2
+  row1: [t2m_bias_f000, td2m_bias_f000]
+  row2: [wind10m_bias_f000]
+
+- plot group: sfc_tseries
+  title: Surface Time Series RMSE f001h
+  number of rows: 2
+  row1: [t2m_rmse_f001, td2m_rmse_f001]
+  row2: [wind10m_rmse_f001]
+
+- plot group: sfc_tseries
+  title: Surface Time Series Bias f001h
+  number of rows: 2
+  row1: [t2m_bias_f001, td2m_bias_f001]
+  row2: [wind10m_bias_f001]
+
+# -----  upper air slides ------
+- plot group: ua_dieoff
+  title: Upper Air Dieoff
+  number of rows: 2
+  row1: [T, RHobT]
+  row2: [Wind]
+
+- plot group: ua_dieoff
+  title: Upper Air Dieoff
+  number of rows: 2
+  row1: [T, RHobT]
+  row2: [Wind]
+
+- plot group: ua_profile
+  title: Upper Air Profile f000, f001
+  number of rows: 2
+  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
+  row1: [T_rmse+bias_f001, RHobT_rmse+bias_f001, Wind_rmse+bias_f001]
+
+- plot group: ua_profile
+  title: Upper Air Profile f003, f006
+  number of rows: 2
+  row1: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]
+  row1: [T_rmse+bias_f006, RHobT_rmse+bias_f006, Wind_rmse+bias_f006]
+
+- plot group: ua_profile
+  title: Upper Air Profile f009, f012
+  number of rows: 2
+  row1: [T_rmse+bias_f009, RHobT_rmse+bias_f009, Wind_rmse+bias_f009]
+  row1: [T_rmse+bias_f012, RHobT_rmse+bias_f012, Wind_rmse+bias_f012]
+
+- plot group: ua_tseries
+  title: Upper Air Time Series RMSE+Bias f000h
+  number of rows: 2
+  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000]
+  row2: [Wind_rmse+bias_f000]
+
+- plot group: ua_tseries
+  title: Upper Air Time Series RMSE+Bias f001h
+  number of rows: 2
+  row1: [T_rmse+bias_f001, RHobT_rmse+bias_f001]
+  row2: [Wind_rmse+bias_f001]
+
+

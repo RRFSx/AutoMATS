@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="224" viewBox="0 0 800 224" role="img" aria-labelledby="title description">
+  <title id="title">Forecast lead color choices</title>
+  <desc id="description">Five named colors beside five colorblind-friendly alternatives, with copyable values in the accompanying README table.</desc>
+  <rect width="800" height="224" fill="white"/>
+  <g font-family="sans-serif" font-size="16" fill="#202020">
+    <text x="12" y="22" font-weight="bold">Named Colors</text>
+    <text x="412" y="22" font-weight="bold">Colorblind-Friendly Alternative</text>
+    <rect x="12" y="40" width="40" height="22" fill="red"/>
+    <text x="64" y="57">red</text><text x="236" y="57">#FF0000</text>
+    <rect x="12" y="76" width="40" height="22" fill="royalblue"/>
+    <text x="64" y="93">royalblue</text><text x="236" y="93">#4169E1</text>
+    <rect x="12" y="112" width="40" height="22" fill="seagreen"/>
+    <text x="64" y="129">seagreen</text><text x="236" y="129">#2E8B57</text>
+    <rect x="12" y="148" width="40" height="22" fill="darkorange"/>
+    <text x="64" y="165">darkorange</text><text x="236" y="165">#FF8C00</text>
+    <rect x="12" y="184" width="40" height="22" fill="magenta"/>
+    <text x="64" y="201">magenta</text><text x="236" y="201">#FF00FF</text>
+    <rect x="412" y="40" width="40" height="22" fill="#0072B2"/>
+    <text x="464" y="57">Blue</text><text x="668" y="57">#0072B2</text>
+    <rect x="412" y="76" width="40" height="22" fill="#E69F00"/>
+    <text x="464" y="93">Orange</text><text x="668" y="93">#E69F00</text>
+    <rect x="412" y="112" width="40" height="22" fill="#009E73"/>
+    <text x="464" y="129">Green</text><text x="668" y="129">#009E73</text>
+    <rect x="412" y="148" width="40" height="22" fill="#D55E00"/>
+    <text x="464" y="165">Vermillion</text><text x="668" y="165">#D55E00</text>
+    <rect x="412" y="184" width="40" height="22" fill="#CC79A7"/>
+    <text x="464" y="201">Purple</text><text x="668" y="201">#CC79A7</text>
+  </g>
+</svg>

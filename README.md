@@ -1,5 +1,5 @@
 # AutoMATS
-Automatic MATS plot generation
+Automatic MATS plot generation    
 _(Only tested on macOS)_
 
 ## Run

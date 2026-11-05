@@ -1,6 +1,6 @@
 # AutoMATS
 Automatic MATS plot generation    
-_(Only tested on macOS)_
+_(Only tested on MacOS)_
 
 ## Run
 
@@ -79,9 +79,6 @@ forecast lead colors:
 
 The same color applies to RMSE, bias, error bars, and the solid legend swatch
 for that lead. 
-
-Choose a swatch below and copy its name or hex value. 
-![Named colors and a colorblind-friendly alternative](assets/lead-colors.svg)
 
 ## Slides
 

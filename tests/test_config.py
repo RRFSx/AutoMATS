@@ -21,6 +21,79 @@ def example():
 
 
 class ConfigTests(unittest.TestCase):
+    def test_slides_disambiguate_captions_using_second_section(self):
+        raw = example()
+        raw["plots"] = [
+            {
+                "name": "ceiling_dieoff",
+                "application": "Ceiling and Visibility",
+                "plot_type": "die off",
+                "region": "All HRRR domain",
+                "matched_samples": True,
+                "variable": ["ceiling"],
+                "Threshold": [500, 1000, 3000, 6000],
+                "statistic": ["CSI", "BIAS"],
+            },
+            {
+                "name": "visibility_dieoff",
+                "application": "Ceiling and Visibility",
+                "plot_type": "die off",
+                "region": "All HRRR domain",
+                "matched_samples": True,
+                "variable": ["visibility"],
+                "Threshold": [1, 3, 5, 10],
+                "statistic": ["CSI", "BIAS"],
+            },
+        ]
+        raw["slides"] = [
+            {
+                "plot group": "ceiling_dieoff",
+                "title": "Ceiling Dieoff CSI",
+                "number of rows": 2,
+                "row1": ["csi_threshold500", "csi_threshold1000"],
+                "row2": ["csi_threshold3000", "csi_threshold6000"],
+            },
+            {
+                "plot group": "ceiling_dieoff",
+                "title": "Ceiling Dieoff BIAS",
+                "number of rows": 2,
+                "row1": ["bias_threshold500", "bias_threshold1000"],
+                "row2": ["bias_threshold3000", "bias_threshold6000"],
+            },
+            {
+                "plot group": "visibility_dieoff",
+                "title": "Visibility Dieoff CSI",
+                "number of rows": 2,
+                "row1": ["csi_threshold1", "csi_threshold3"],
+                "row2": ["csi_threshold5", "csi_threshold10"],
+            },
+            {
+                "plot group": "visibility_dieoff",
+                "title": "Visibility Dieoff BIAS",
+                "number of rows": 2,
+                "row1": ["bias_threshold1", "bias_threshold3"],
+                "row2": ["bias_threshold5", "bias_threshold10"],
+            },
+        ]
+        plan = build_plan(raw)
+        self.assertEqual(len(plan.slides), 4)
+        self.assertEqual(
+            plan.slides[0].captions,
+            (("threshold500", "threshold1000"), ("threshold3000", "threshold6000")),
+        )
+        self.assertEqual(
+            plan.slides[1].captions,
+            (("threshold500", "threshold1000"), ("threshold3000", "threshold6000")),
+        )
+        self.assertEqual(
+            plan.slides[2].captions,
+            (("threshold1", "threshold3"), ("threshold5", "threshold10")),
+        )
+        self.assertEqual(
+            plan.slides[3].captions,
+            (("threshold1", "threshold3"), ("threshold5", "threshold10")),
+        )
+
     def test_slides_resolve_rows_exactly_before_unique_partial_matches(self):
         raw = example()
         raw["plots"][0].update({"name": "ua_dieoff", "plot_type": "dieoff",

@@ -308,13 +308,13 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
             raise ConfigError(f"{context}: unknown options {sorted(unknown)}; use number of rows")
         title = _text(item.get("title", candidates[0].name), f"{context}.title")
         rows = []
-        captions = []
+        slide_parts = []
         for number in range(1, count + 1):
             references = item.get(f"row{number}")
             if not isinstance(references, list) or not references:
                 raise ConfigError(f"{context}.row{number} must be a nonempty list")
             resolved = []
-            row_captions = []
+            row_parts = []
             for reference in references:
                 original = _text(reference, f"{context}.row{number} figure")
                 reference = original.casefold()
@@ -349,10 +349,21 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
                 prefix = matches[0].name + "_"
                 if caption.casefold().startswith(prefix.casefold()):
                     caption = caption[len(prefix):]
-                row_captions.append(caption.split("_", 1)[0])
+                row_parts.append(caption.split("_"))
             rows.append(tuple(resolved))
-            captions.append(tuple(row_captions))
-        slides.append(SlideSpec(candidates[0].name, title, tuple(rows), tuple(captions)))
+            slide_parts.append(row_parts)
+
+        all_parts = [p for row in slide_parts for p in row]
+        use_second_section = (
+            len(all_parts) > 1
+            and all(len(p) >= 2 for p in all_parts)
+            and len({p[0].casefold() for p in all_parts}) == 1
+        )
+        captions = tuple(
+            tuple(p[1] if use_second_section else p[0] for p in row)
+            for row in slide_parts
+        )
+        slides.append(SlideSpec(candidates[0].name, title, tuple(rows), captions))
     return tuple(slides)
 
 

@@ -34,6 +34,51 @@ def compute_default_dates():
     return start, end
 
 
+def fetch_mats_date_range(base_url="https://gsl.noaa.gov/mats", model="rrfsv2x"):
+    """Query MATS for the active latest date range of the model in the MATS database."""
+    try:
+        from playwright.sync_api import sync_playwright
+        from automats.runner import CHROMIUM_ARGS, CHROMIUM_IGNORE_DEFAULT_ARGS, DEFAULT_USER_AGENT
+        from automats.browser import UpperAirBrowser
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                channel="chrome",
+                headless=True,
+                args=CHROMIUM_ARGS,
+                ignore_default_args=CHROMIUM_IGNORE_DEFAULT_ARGS,
+            )
+            try:
+                context = browser.new_context(
+                    viewport={"width": 1600, "height": 1400},
+                    user_agent=DEFAULT_USER_AGENT,
+                )
+                client = UpperAirBrowser(context, base_url)
+                client.application = "surface"
+                client.expected = {}
+                client.page = context.new_page()
+                client._open_page(f"{base_url.rstrip('/')}/surface")
+                client.page.wait_for_function(
+                    '() => typeof matsParamUtils !== "undefined" && (matsParamUtils.getOptionsForParam("data-source") || []).length > 0',
+                    timeout=15000,
+                )
+                client.page.select_option("#plotTypes-selector", value="TimeSeries")
+                client.page.wait_for_function('value => Session.get("plotType") === value', arg="TimeSeries", polling=250)
+                client._settle_controls()
+                client._set("data-source", model)
+                dates_str = client.page.evaluate('() => matsParamUtils.getValueForParamName("dates")')
+                if dates_str and " - " in dates_str:
+                    s_str, e_str = dates_str.split(" - ")
+                    s_dt = datetime.strptime(s_str.strip(), "%m/%d/%Y %H:%M").replace(tzinfo=timezone.utc)
+                    e_dt = datetime.strptime(e_str.strip(), "%m/%d/%Y %H:%M").replace(tzinfo=timezone.utc)
+                    return s_dt, e_dt
+            finally:
+                browser.close()
+    except Exception:
+        pass
+    return None
+
+
 def parse_dates(date_str):
     match = re.match(r"^(\d{10})-(\d{10})$", date_str)
     if not match:
@@ -52,7 +97,7 @@ def usage(error_msg=None):
         f"Usage: {Path(__file__).name} [YYYYMMDDHH-YYYYMMDDHH] [additional automats options...]\n"
         "\n"
         "Makes verification plots comparing real-time 'rrfsv2x' and 'rrfsv2b' against HRRR_OPS.\n"
-        "If date range is omitted, defaults to MATS dynamic latest 30-day window.\n"
+        "If date range is omitted, defaults to MATS dynamic latest 30-day window from the database.\n"
         "Reuses recipes/baseline.yaml by overwriting its experiments section,\n"
         "and saves a temporary recipe under ./tmp/.\n"
         "\n"
@@ -86,7 +131,6 @@ def main(argv=None):
             forward_args.append(arg)
         i += 1
 
-    tag = "latest"
     start_iso = None
     end_iso = None
 
@@ -99,6 +143,14 @@ def main(argv=None):
         except ValueError as e:
             usage(str(e))
             return 1
+    else:
+        # Discover the actual date range from the MATS database to name the output tag
+        resolved = fetch_mats_date_range()
+        if resolved is not None:
+            tag = f"{resolved[0].strftime('%Y%m%d%H')}-{resolved[1].strftime('%Y%m%d%H')}"
+        else:
+            start_dt, end_dt = compute_default_dates()
+            tag = f"{start_dt.strftime('%Y%m%d%H')}-{end_dt.strftime('%Y%m%d%H')}"
 
     baseline_recipe = ROOT / "recipes" / "baseline.yaml"
     if not baseline_recipe.is_file():
@@ -116,7 +168,7 @@ def main(argv=None):
     ]
 
     # Set start and end dates only when explicitly provided by the user;
-    # otherwise leave unset so MATS automatically uses its dynamic latest 30-day window.
+    # otherwise leave unset so MATS automatically uses its dynamic latest 30-day window from the database.
     common = data.setdefault("common", {})
     if start_iso and end_iso:
         common["start"] = start_iso

@@ -196,13 +196,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(jobs["exclude_c"].relative_path,
                          "exclude_c/exclude_c_composite_reflectivity_csi_threshold25.png")
 
-        # Unknown experiment
-        bad = deepcopy(raw)
-        bad["plots"][1]["exclude experiment"] = ["NONEXISTENT"]
-        with self.assertRaisesRegex(ConfigError, "does not match any configured experiment"):
-            build_plan(bad)
+        # Unknown experiment in exclude experiment is safely ignored (no-op)
+        ign = deepcopy(raw)
+        ign["plots"][1]["exclude experiment"] = ["NONEXISTENT"]
+        plan_ign = build_plan(ign)
+        jobs_ign = {job.name: job for job in plan_ign.jobs}
+        self.assertEqual([e.name for e in jobs_ign["exclude_c"].experiments], ["EXP_A", "EXP_B", "EXP_C"])
 
         # Exclude all experiments
+        bad = deepcopy(raw)
         bad["plots"][1]["exclude experiment"] = ["EXP_A", "EXP_B", "EXP_C"]
         with self.assertRaisesRegex(ConfigError, "all experiments were excluded"):
             build_plan(bad)

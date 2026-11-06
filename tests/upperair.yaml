@@ -16,7 +16,7 @@ automation:
 plots:
 - name: ua_profile
   application: "Upper Air"
-  plot_type: dieoff
+  plot_type: profile
   truth: "RAOBs (Traditional)"
   region: "HRRR domain"
   matched_samples: true

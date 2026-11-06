@@ -420,8 +420,7 @@ def build_plan(raw: Any) -> Plan:
                 norm_val = normalize(val)
                 matches = [exp for exp in experiments if norm_val in {normalize(exp.name), normalize(exp.label)}]
                 if not matches:
-                    available = [exp.name for exp in experiments]
-                    raise ConfigError(f"Plot {name!r}: exclude experiment {val!r} does not match any configured experiment: {available}")
+                    continue
                 if len(matches) > 1:
                     matched_names = [exp.name for exp in matches]
                     raise ConfigError(f"Plot {name!r}: exclude experiment {val!r} is ambiguous: {matched_names}")

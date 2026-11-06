@@ -519,6 +519,23 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(resolve_option("t2m", ["Temperature at 2m (C)"], "variable",
                                         {"t2m": "Temperature at 2m"}), "Temperature at 2m (C)")
         self.assertEqual(resolve_option("Wind", ["Wind", "Wind Speed"], "variable"), "Wind")
+
+        # Threshold matching with aliases: "1" matches "1 (visibility < 1 mi)" instead of "1/2" or "10"
+        vis_options = [
+            "1/2 (visibility < 1/2 mi)",
+            "1 (visibility < 1 mi)",
+            "10 (visibility < 10 mi)",
+            "2 (visibility < 2 mi)",
+            "3 (visibility < 3 mi)",
+            "5 (visibility < 5 mi)",
+        ]
+        vis_aliases = {"1": "1 (visibility", "1/2": "1/2 (visibility", "10": "10 (visibility"}
+        self.assertEqual(resolve_option("1", vis_options, "threshold", vis_aliases), "1 (visibility < 1 mi)")
+        self.assertEqual(resolve_option("1/2", vis_options, "threshold", vis_aliases), "1/2 (visibility < 1/2 mi)")
+        self.assertEqual(resolve_option("10", vis_options, "threshold", vis_aliases), "10 (visibility < 10 mi)")
+        self.assertEqual(resolve_option("3", vis_options, "threshold", vis_aliases), "3 (visibility < 3 mi)")
+        self.assertEqual(resolve_option("5", vis_options, "threshold", vis_aliases), "5 (visibility < 5 mi)")
+
         for value, options in (("speed", ["U Speed", "V Speed"]), ("xxxxx", ["Dieoff"])):
             with self.assertRaises(RunError):
                 resolve_option(value, options, "variable")
@@ -1027,6 +1044,30 @@ class ControlPacingTests(unittest.TestCase):
         actual = self.client._set("Difference curves", "Diff all curves against the 1st added curve")
         self.assertEqual(actual, "Diff all curves against the 1st added curve")
         self.assertEqual(self.client.expected["plotFormat"], "Diff all curves against the 1st added curve")
+
+    def test_visibility_threshold_setting(self):
+        from automats.browser import CONTROLS_READY
+
+        self.client.application = "ceil-vis"
+        self.client.expected = {"variable": "visibility"}
+        thresh_param = {
+            "name": "threshold", "label": "Threshold", "disabled": False,
+            "type": "select", "scope": "curve", "value": "none",
+            "options": [
+                {"value": "1/2 (visibility < 1/2 mi)", "label": "1/2 (visibility < 1/2 mi)"},
+                {"value": "1 (visibility < 1 mi)", "label": "1 (visibility < 1 mi)"},
+                {"value": "10 (visibility < 10 mi)", "label": "10 (visibility < 10 mi)"},
+                {"value": "3 (visibility < 3 mi)", "label": "3 (visibility < 3 mi)"},
+            ],
+        }
+        self.client._parameters = Mock(return_value=[{
+            **thresh_param, "value": "1 (visibility < 1 mi)"
+        }])
+        self.client.page.evaluate.side_effect = lambda script, *args: True if script == CONTROLS_READY else None
+        self.client._resolve_parameter = Mock(return_value=thresh_param)
+        actual = self.client._set("threshold", "1")
+        self.assertEqual(actual, "1 (visibility < 1 mi)")
+        self.assertEqual(self.client.expected["threshold"], "1 (visibility < 1 mi)")
 
     def test_dependent_value_changes_restart_the_stable_interval(self):
         self.client._parameters.side_effect = lambda: [

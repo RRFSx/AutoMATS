@@ -523,6 +523,12 @@ class UpperAirBrowser:
                 aliases = {key: label for key, (label, tag) in VARIABLES.items()}
             elif name == "statistic" and self.application in {"surface", "upperair"}:
                 aliases = STATISTICS
+            elif name == "threshold" and str(self.expected.get("variable", "")).lower() in {"visibility", "vis"}:
+                aliases = {
+                    "1": "1 (visibility",
+                    "1/2": "1/2 (visibility",
+                    "10": "10 (visibility",
+                }
             elif name == "plotFormat":
                 aliases = {
                     "none": "none",

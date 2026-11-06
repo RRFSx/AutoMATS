@@ -267,7 +267,7 @@ class QueryPacer:
 
 def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool = True,
              log=print, *, metadata_only: bool = False, show_browser: bool = False, status=None,
-             skip_existing: bool = False) -> int:
+             update: bool = False) -> int:
     def report(message, completed=None, total=None, wait_seconds=None):
         if status is not None:
             try:
@@ -306,11 +306,11 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
             log("No cached figures need a metadata refresh" if metadata_only else
                 "No figures requested")
             return 0
-        if skip_existing:
+        if not update and not metadata_only:
             existing_count = sum(1 for job in jobs if figure_exists(output, job.relative_path))
             if existing_count == len(jobs):
                 report("All figures already exist", completed=len(jobs), total=len(jobs))
-                log(f"All {len(jobs)} figures already exist in {output}; skipping MATS queries")
+                log(f"All {len(jobs)} figures already exist in {output}; skipping MATS queries (use --update to regenerate)")
                 return 0
         report("Starting browser automation", completed=0, total=len(jobs))
         with sync_playwright() as manager:
@@ -336,7 +336,7 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
                     if limit is not None and saved >= limit:
                         break
                     label = Path(job.relative_path).name
-                    if skip_existing and figure_exists(output, job.relative_path):
+                    if not update and not metadata_only and figure_exists(output, job.relative_path):
                         report(f"Skipping existing figure: {label}", completed=index, total=len(jobs))
                         log(f"[{index}/{len(jobs)}] Skip existing: {job.relative_path}")
                         continue

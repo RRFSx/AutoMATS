@@ -357,7 +357,7 @@ class ResultTests(unittest.TestCase):
                 self.assertEqual(run_plan(plan, root / "figures", log=lambda message: None), 0)
                 browser.assert_not_called()
 
-    def test_skip_existing_all_figures_does_not_start_browser(self):
+    def test_default_skip_existing_all_figures_does_not_start_browser(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output = root / "figures"
@@ -367,11 +367,11 @@ class ResultTests(unittest.TestCase):
                 target.write_bytes(png_image())
             with patch("automats.runner.Path.home", return_value=root), \
                     patch("playwright.sync_api.sync_playwright") as browser:
-                saved = run_plan(self.plan, output, skip_existing=True, log=lambda message: None)
+                saved = run_plan(self.plan, output, log=lambda message: None)
                 self.assertEqual(saved, 0)
                 browser.assert_not_called()
 
-    def test_skip_existing_partial_figures_only_plots_missing(self):
+    def test_default_skip_existing_partial_figures_only_plots_missing(self):
         plan = replace(self.plan, jobs=self.plan.jobs[:2])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -389,9 +389,32 @@ class ResultTests(unittest.TestCase):
                     patch("playwright.sync_api.sync_playwright"), \
                     patch("automats.browser.UpperAirBrowser") as client:
                 client.return_value.plot.side_effect = plot
-                saved = run_plan(plan, output, skip_existing=True, log=lambda message: None)
+                saved = run_plan(plan, output, log=lambda message: None)
                 self.assertEqual(saved, 1)
                 self.assertEqual(plotted_jobs, [plan.jobs[1]])
+
+    def test_update_regenerates_existing_figures(self):
+        plan = replace(self.plan, jobs=self.plan.jobs[:2])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "figures"
+            for job in plan.jobs:
+                target = output / job.relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(png_image())
+            plotted_jobs = []
+
+            def plot(job):
+                plotted_jobs.append(job)
+                return png_image(), {}
+
+            with patch("automats.runner.Path.home", return_value=root), \
+                    patch("playwright.sync_api.sync_playwright"), \
+                    patch("automats.browser.UpperAirBrowser") as client:
+                client.return_value.plot.side_effect = plot
+                saved = run_plan(plan, output, update=True, log=lambda message: None)
+                self.assertEqual(saved, 2)
+                self.assertEqual(plotted_jobs, list(plan.jobs))
 
     def test_store_accepts_only_png_and_rejects_jpeg(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -582,7 +605,7 @@ class ResultTests(unittest.TestCase):
             self.assertTrue(store.completed(self.job, effective=effective))
             self.assertFalse(store.completed(self.job, effective={"statistic": "Bias"}))
 
-    def test_each_normal_run_regenerates_even_a_matching_existing_figure(self):
+    def test_update_regenerates_even_a_matching_existing_figure(self):
         plan = replace(self.plan, jobs=(self.job,))
         clock = FakeClock()
         pacer = QueryPacer(plan.settings, clock.clock, clock.wait)
@@ -599,7 +622,7 @@ class ResultTests(unittest.TestCase):
                 client.return_value.effective_settings = {}
                 client.return_value.plot.side_effect = [(image, {"effective_settings": {}}) for image in images]
                 for image in images:
-                    self.assertEqual(run_plan(plan, output, log=lambda message: None), 1)
+                    self.assertEqual(run_plan(plan, output, update=True, log=lambda message: None), 1)
                     self.assertEqual((output / self.job.relative_path).read_bytes(), image)
                 self.assertEqual(client.return_value.plot.call_count, 2)
 
@@ -615,7 +638,7 @@ class ResultTests(unittest.TestCase):
                 client.return_value.effective_settings = {}
                 client.return_value.plot.side_effect = RunError("MATS query failed")
                 with self.assertRaisesRegex(RunError, "MATS query failed"):
-                    run_plan(plan, output, log=lambda message: None)
+                    run_plan(plan, output, update=True, log=lambda message: None)
             self.assertEqual((output / self.job.relative_path).read_bytes(), old_image)
 
     def test_curve_validation_rejects_wrong_dates_leads_and_models(self):
@@ -1965,20 +1988,23 @@ class CliTests(unittest.TestCase):
         execute.assert_not_called()
         self.assertIn("custom figures/ua_profile/ua_profile_T_rmse_f000.png", output.getvalue().splitlines())
 
-    def test_skip_existing_flags_forwarded_to_run_plan(self):
-        for flag in ("--skip-existing", "--ignore-existing"):
-            with self.subTest(flag=flag), patch("automats.cli.run_plan", return_value=0) as execute:
-                with redirect_stdout(StringIO()):
-                    self.assertEqual(main([str(self.recipe), flag]), 0)
-                self.assertTrue(execute.call_args.kwargs["skip_existing"])
+    def test_update_flag_forwarded_to_run_plan(self):
+        with patch("automats.cli.run_plan", return_value=0) as execute:
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main([str(self.recipe)]), 0)
+            self.assertFalse(execute.call_args.kwargs["update"])
+        with patch("automats.cli.run_plan", return_value=0) as execute:
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main([str(self.recipe), "--update"]), 0)
+            self.assertTrue(execute.call_args.kwargs["update"])
 
-    def test_skip_existing_rejects_slides_only_and_metadata_only(self):
+    def test_update_rejects_slides_only_and_metadata_only(self):
         for flag in ("--slides-only", "--metadata-only"):
             with self.subTest(flag=flag), redirect_stderr(StringIO()), self.assertRaises(SystemExit) as result:
-                main([str(self.recipe), "--skip-existing", flag])
+                main([str(self.recipe), "--update", flag])
             self.assertEqual(result.exception.code, 2)
 
-    def test_plan_with_skip_existing_omits_existing_figures(self):
+    def test_plan_omits_existing_figures_unless_update(self):
         with tempfile.TemporaryDirectory() as directory:
             output_dir = Path(directory)
             fake_fig = output_dir / "ua_profile" / "ua_profile_T_rmse_f000.png"
@@ -1986,11 +2012,19 @@ class CliTests(unittest.TestCase):
             fake_fig.write_bytes(png_image())
             output = StringIO()
             with patch("automats.cli.run_plan") as execute, redirect_stdout(output):
-                self.assertEqual(main([str(self.recipe), "--output-dir", str(output_dir), "--plan", "--skip-existing"]), 0)
+                self.assertEqual(main([str(self.recipe), "--output-dir", str(output_dir), "--plan"]), 0)
             execute.assert_not_called()
             lines = output.getvalue().splitlines()
             self.assertNotIn(str(fake_fig), lines)
             self.assertEqual(len(lines), 42)
+
+            output_update = StringIO()
+            with patch("automats.cli.run_plan") as execute, redirect_stdout(output_update):
+                self.assertEqual(main([str(self.recipe), "--output-dir", str(output_dir), "--plan", "--update"]), 0)
+            execute.assert_not_called()
+            lines_update = output_update.getvalue().splitlines()
+            self.assertIn(str(fake_fig), lines_update)
+            self.assertEqual(len(lines_update), 43)
 
 
 if __name__ == "__main__":

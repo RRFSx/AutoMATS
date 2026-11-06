@@ -35,7 +35,7 @@ def usage(error_msg=None):
         "  --plan             List planned figures without running browser\n"
         "  --metadata-only    Refresh metadata on cached figures locally\n"
         "  --slides-only      Build PowerPoint deck from existing PNGs\n"
-        "  --skip-existing    Skip figures that already exist in output directory\n"
+        "  --update           Regenerate figures even if they already exist in output directory\n"
         "  --limit N          Generate at most N figures\n"
         "  --show-browser     Run Chrome visibly instead of headless background\n"
         "  -h, --help         Show this help message and exit",

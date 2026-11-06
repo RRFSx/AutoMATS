@@ -106,10 +106,10 @@ Figure references match within the named plot group: exact names first,
 then unique partial matches. Missing or ambiguous references stop slide
 generation only; plotting continues. 
 
-Skip figures that already exist in the output directory (only query MATS for missing figures):
+AutoMATS skips figures that already exist in the output directory by default (only querying MATS for missing figures). To force regeneration of all figures, pass `--update`:
 
 ```sh
-./run.sh recipes/baseline.yaml --skip-existing
+./run.sh recipes/baseline.yaml --update
 ```
 
 Rebuild slides from existing PNGs without opening Chrome or contacting MATS:

@@ -288,6 +288,25 @@ def load_plan(path: Path) -> Plan:
     return build_plan(raw)
 
 
+def _format_slide_caption(caption: str, job: PlotJob) -> str:
+    m = re.match(r"^threshold_*(.+)$", caption, re.IGNORECASE)
+    if not m:
+        return caption
+    val = m.group(1).lstrip("_")
+    var = (job.variable or "").lower()
+    var_tag = (job.variable_tag or "").lower()
+    app = (job.application or "").lower()
+
+    if "reflectivity" in var or "reflectivity" in var_tag or "radar" in app:
+        return f">{val} dBZ"
+    if "ceiling" in var or "ceiling" in var_tag:
+        return f"<{val} ft"
+    if "visibility" in var or "visibility" in var_tag or "vis" in var_tag:
+        unit = "mile" if val in ("1", "1/2", "0.5") else "miles"
+        return f"<{val} {unit}"
+    return caption
+
+
 def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
     if not isinstance(raw, list):
         raise ConfigError("slides must be a list")
@@ -309,12 +328,14 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
         title = _text(item.get("title", candidates[0].name), f"{context}.title")
         rows = []
         slide_parts = []
+        slide_jobs = []
         for number in range(1, count + 1):
             references = item.get(f"row{number}")
             if not isinstance(references, list) or not references:
                 raise ConfigError(f"{context}.row{number} must be a nonempty list")
             resolved = []
             row_parts = []
+            row_jobs = []
             for reference in references:
                 original = _text(reference, f"{context}.row{number} figure")
                 reference = original.casefold()
@@ -350,8 +371,10 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
                 if caption.casefold().startswith(prefix.casefold()):
                     caption = caption[len(prefix):]
                 row_parts.append(caption.split("_"))
+                row_jobs.append(matches[0])
             rows.append(tuple(resolved))
             slide_parts.append(row_parts)
+            slide_jobs.append(row_jobs)
 
         all_parts = [p for row in slide_parts for p in row]
         use_second_section = (
@@ -360,8 +383,11 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
             and len({p[0].casefold() for p in all_parts}) == 1
         )
         captions = tuple(
-            tuple(p[1] if use_second_section else p[0] for p in row)
-            for row in slide_parts
+            tuple(
+                _format_slide_caption(p[1] if use_second_section else p[0], job)
+                for p, job in zip(parts_row, jobs_row)
+            )
+            for parts_row, jobs_row in zip(slide_parts, slide_jobs)
         )
         slides.append(SlideSpec(candidates[0].name, title, tuple(rows), captions))
     return tuple(slides)

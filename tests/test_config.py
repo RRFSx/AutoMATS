@@ -25,6 +25,16 @@ class ConfigTests(unittest.TestCase):
         raw = example()
         raw["plots"] = [
             {
+                "name": "radar_dieoff",
+                "application": "Radar (MRMS)",
+                "plot_type": "die off",
+                "region": "Continental US",
+                "matched_samples": True,
+                "variable": ["Composite Reflectivity"],
+                "Threshold": [25, 35, 45],
+                "statistic": ["CSI", "BIAS"],
+            },
+            {
                 "name": "ceiling_dieoff",
                 "application": "Ceiling and Visibility",
                 "plot_type": "die off",
@@ -46,6 +56,13 @@ class ConfigTests(unittest.TestCase):
             },
         ]
         raw["slides"] = [
+            {
+                "plot group": "radar_dieoff",
+                "title": "RADAR MRMS Dieoff CSI",
+                "number of rows": 2,
+                "row1": ["csi_threshold25", "csi_threshold35"],
+                "row2": ["csi_threshold45"],
+            },
             {
                 "plot group": "ceiling_dieoff",
                 "title": "Ceiling Dieoff CSI",
@@ -76,22 +93,26 @@ class ConfigTests(unittest.TestCase):
             },
         ]
         plan = build_plan(raw)
-        self.assertEqual(len(plan.slides), 4)
+        self.assertEqual(len(plan.slides), 5)
         self.assertEqual(
             plan.slides[0].captions,
-            (("threshold500", "threshold1000"), ("threshold3000", "threshold6000")),
+            ((">25 dBZ", ">35 dBZ"), (">45 dBZ",)),
         )
         self.assertEqual(
             plan.slides[1].captions,
-            (("threshold500", "threshold1000"), ("threshold3000", "threshold6000")),
+            (("<500 ft", "<1000 ft"), ("<3000 ft", "<6000 ft")),
         )
         self.assertEqual(
             plan.slides[2].captions,
-            (("threshold1", "threshold3"), ("threshold5", "threshold10")),
+            (("<500 ft", "<1000 ft"), ("<3000 ft", "<6000 ft")),
         )
         self.assertEqual(
             plan.slides[3].captions,
-            (("threshold1", "threshold3"), ("threshold5", "threshold10")),
+            (("<1 mile", "<3 miles"), ("<5 miles", "<10 miles")),
+        )
+        self.assertEqual(
+            plan.slides[4].captions,
+            (("<1 mile", "<3 miles"), ("<5 miles", "<10 miles")),
         )
 
     def test_slides_resolve_rows_exactly_before_unique_partial_matches(self):

@@ -11,7 +11,7 @@ Use `--show-browser` to keep it visible for debugging
 ### One-Time Setup
 
 ```sh
-cd automats
+cd AutoMATS
 ./setup.sh
 ```
 The setup script creates a private `.venv` and installs AutoMATS, PyYAML,

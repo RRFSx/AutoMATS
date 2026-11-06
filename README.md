@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="AutoMATS" width="450">
+  <img src="assets/logo.png" alt="AutoMATS" width="260">
 </p>
 
 # AutoMATS

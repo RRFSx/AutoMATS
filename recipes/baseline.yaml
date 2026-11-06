@@ -47,7 +47,7 @@ plots:
   plot_type: "time series"
   region: "All HRRR domain"
   variable: [t2m, td2m, wind10m]
-  statistic: [rmse, bias, rmse+bias]
+  statistic: [rmse, bias]
   forecast lead time: [0, 1, 12]
   #Difference curves: "Diff all curves against the 1st added curve"
 
@@ -139,19 +139,19 @@ slides:
   title: Upper Air Profile f000, f001
   number of rows: 2
   row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
-  row1: [T_rmse+bias_f001, RHobT_rmse+bias_f001, Wind_rmse+bias_f001]
+  row2: [T_rmse+bias_f001, RHobT_rmse+bias_f001, Wind_rmse+bias_f001]
 
 - plot group: ua_profile
   title: Upper Air Profile f003, f006
   number of rows: 2
   row1: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]
-  row1: [T_rmse+bias_f006, RHobT_rmse+bias_f006, Wind_rmse+bias_f006]
+  row2: [T_rmse+bias_f006, RHobT_rmse+bias_f006, Wind_rmse+bias_f006]
 
 - plot group: ua_profile
   title: Upper Air Profile f009, f012
   number of rows: 2
   row1: [T_rmse+bias_f009, RHobT_rmse+bias_f009, Wind_rmse+bias_f009]
-  row1: [T_rmse+bias_f012, RHobT_rmse+bias_f012, Wind_rmse+bias_f012]
+  row2: [T_rmse+bias_f012, RHobT_rmse+bias_f012, Wind_rmse+bias_f012]
 
 - plot group: ua_tseries
   title: Upper Air Time Series RMSE+Bias f000h

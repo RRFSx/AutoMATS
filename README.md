@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="AutoMATS" width="450">
+</p>
+
 # AutoMATS
 Automatic MATS plot generation    
 _(Only tested on MacOS)_

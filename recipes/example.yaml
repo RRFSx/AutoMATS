@@ -5,6 +5,8 @@ experiments:
   color: red
 - name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
   color: blue
+- name: HRRR_OPS
+  color: orange
 
 automation:
   inter-plot waiting seconds: 3
@@ -15,15 +17,15 @@ common:
   marker weight: 8
 
 plots:
-- name: sfc_tseries
-  application: "surface"
-  truth: "METAR"
-  plot_type: "time series"
-  region: "All HRRR domain"
-  variable: [t2m, td2m, wind10m]
-  statistic: [rmse]
-  forecast lead time: [0]
-  Difference curves: "Diff all curves against the 1st added curve"
+#- name: sfc_tseries
+#  application: "surface"
+#  truth: "METAR"
+#  plot_type: "time series"
+#  region: "All HRRR domain"
+#  variable: [t2m, td2m, wind10m]
+#  statistic: [rmse]
+#  forecast lead time: [0]
+#  Difference curves: "Diff all curves against the 1st added curve"
 
 #- name: ua_profile
 #  application: "Upper Air"
@@ -34,6 +36,27 @@ plots:
 #  variable: [T, RHobT, Wind]
 #  statistic: [rmse+bias]
 #  forecast lead time: [0, 3]
+
+#- name: radar_dieoff
+#  exclude experiment: [HRRR_OPS]
+#  application: "Radar (MRMS)"
+#  plot_type: "die off"
+#  region: "Continental US"
+#  matched_samples: true
+#  variable: ["Composite Reflectivity"]
+#  Threshold: [25]
+#  statistic: [CSI, BIAS]
+#  Difference curves: "Diff all curves against the 1st added curve"
+
+- name: Ceiling_dieoff
+  application: "Ceiling and Visibility"
+  plot_type: "die off"
+  region: "All HRRR domain"
+  matched_samples: true
+  variable: ["ceiling"]
+  Threshold: [500]
+  statistic: [CSI, BIAS]
+  Difference curves: "Diff all curves against the 1st added curve"
 
 slides:
 - plot group: sfc_tseries

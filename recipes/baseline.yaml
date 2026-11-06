@@ -4,36 +4,40 @@
 #   ua_dieoff:   T, RHobT, Wind, rmse+bias
 #   ua_profile:  T, RHobT, Wind, rmse+bias, f000, f001, f003, f006, f009, f012
 #   ua_tseries:  T, RHobT, Wind, rmse+bias, f001
-#   mrms_dieoff: cref, csi+freq, treshold25, threshold35, threshold45
+#   radar_dieoff:      cref, csi+freq, treshold25, threshold35, threshold45
+#   ceiling_dieoff:    csi+freq, treshold500, threshold1000, threshold3000, threshold6000
+#   visibility_dieoff: csi+freq, treshold1, threshold3, threshold5, threshold10
 #
 
 experiments:
 - name: RRFSv2_conus_3km_ret_v2x_retv4
   color: red
-  COMROOT:
+  #COMROOT: /gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
 - name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
   color: blue
-  COMROOT:
 - name: HRRR_OPS
   color: orange
 #- name: RRFS_A
 #  color: "#5F5F5F"
 
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# detailed recipes
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-automation:
-  inter-plot waiting seconds: 3 
-  control waiting seconds: 0.3  # pesudo "mouse click" intervals, 300ms 
-  #base_url: "https://gsl.noaa.gov/int-mats"  # When the official MATS is down
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# detailed recipes
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 common:
   #start and end dates are optional, if not specificed, use the first exp date range
   #start: "2024-05-06T10:00:00Z"
   #end: "2024-05-13T00:00:00Z"
   line weight: 3
   marker weight: 8
+  #local port: 40896  # HPC forwording port for transfering files
 
+automation:
+  inter-plot waiting seconds: 3 
+  control waiting seconds: 0.3  # pesudo "mouse click" intervals, 300ms 
+  #base_url: "https://gsl.noaa.gov/int-mats"  # When the official MATS is down
+
+# ======================================= plot groups  =============================================
 plots:
 - name: sfc_dieoff
   application: "surface"
@@ -93,7 +97,7 @@ plots:
   statistic: [CSI, Bias]
   Difference curves: "Diff all curves against the 1st added curve"
 
-- name: Ceiling_dieoff
+- name: ceiling_dieoff
   application: "Ceiling and Visibility"
   plot_type: "die off"
   region: "All HRRR domain"
@@ -103,7 +107,7 @@ plots:
   statistic: [CSI, BIAS]
   Difference curves: "Diff all curves against the 1st added curve"
 
-- name: Visibility_dieoff
+- name: visibility_dieoff
   application: "Ceiling and Visibility"
   plot_type: "die off"
   region: "All HRRR domain"
@@ -114,6 +118,7 @@ plots:
   Difference curves: "Diff all curves against the 1st added curve"
 
 
+# ======================================= MATS slides  =============================================
 slides:
 # -----  surface slides ------
 - plot group: sfc_dieoff
@@ -192,26 +197,45 @@ slides:
 
 
 # -----  C&V slides ------
-- plot group: Ceiling_dieoff
+- plot group: ceiling_dieoff
   title: Ceiling Dieoff CSI
   number of rows: 2
   row1: [csi_threshold500, csi_threshold1000]
   row2: [csi_threshold3000, csi_threshold6000]
 
-- plot group: Ceiling_dieoff
+- plot group: ceiling_dieoff
   title: Ceiling Dieoff BIAS
   number of rows: 2
   row1: [bias_threshold500, bias_threshold1000]
   row2: [bias_threshold3000, bias_threshold6000]
 
-- plot group: Visibility_dieoff
+- plot group: visibility_dieoff
   title: Visibility Dieoff CSI
   number of rows: 2
   row1: [csi_threshold1, csi_threshold3]
   row2: [csi_threshold5, csi_threshold10]
 
-- plot group: Visibility_dieoff
+- plot group: visibility_dieoff
   title: Visibility Dieoff BIAS
   number of rows: 2
   row1: [bias_threshold1, bias_threshold3]
   row2: [bias_threshold5, bias_threshold10]
+
+
+# ======================================= graphics slides  =============================================
+graphics slides:
+- type: same valid time
+  title: Composite Reflectivity
+  graphics name: cref_full_sfc_f006.png
+  cycle: 2024050700
+  number of rows: 2
+  row1: [obs, RRFSv2_conus_3km_ret_v2x_retv4]
+  row2: 
+
+- type: same cycle
+  title: Composite Reflectivity
+  experiment name: RRFSv2_conus_3km_ret_v2x_retv4
+  cycle: 2024050700
+  number of rows: 2
+  row1: [obs, cref_full_sfc_f001.pg]
+  row2: [obs, cref_full_sfc_f002.pg]

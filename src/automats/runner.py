@@ -351,7 +351,10 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
                             metadata.pop("disclaimer", None)
                             image, metadata["figure"] = annotate_image(
                                 page, job, image, metadata.get("figure"),
-                                plotted_curves=metadata.get("curves"))
+                                effective_settings=metadata.get("effective_settings"),
+                                plotted_curves=metadata.get("curves"),
+                                plot_params=metadata.get("plot_params"),
+                            )
                             store.save(job, image, metadata)
                             saved += 1
                             report(f"Updated {label}", completed=index)

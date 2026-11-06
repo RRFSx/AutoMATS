@@ -964,6 +964,20 @@ class MetadataTests(unittest.TestCase):
                 }""", {"image": "data:image/png;base64," + base64.b64encode(upgraded).decode(),
                        "top": upgraded_metadata["header_height"]})
                 self.assertTrue(all(channel < 100 for channel in border_pixels[:3]))
+
+                # Difference curves legend
+                diff_job = replace(job, parameters=(("Difference curves", "Diff all curves against the 1st added curve"),))
+                plot_params = {
+                    "curves": [
+                        {"data-source": "RRFSv2x", "label": "RRFSv2x", "color": "rgb(255,0,0)", "diffFrom": None},
+                        {"data-source": "RRFSv2b", "label": "RRFSv2b", "color": "rgb(0,0,255)", "diffFrom": None},
+                        {"data-source": "RRFSv2b", "label": "RRFSv2b-RRFSv2x", "color": "rgb(255,165,0)", "diffFrom": [1, 0]},
+                    ]
+                }
+                diff_annotated, diff_meta = annotate_image(page, diff_job, bytes(image), plot_params=plot_params)
+                self.assertEqual(diff_meta["legend_rows"], 2)
+                self.assertEqual(diff_meta["legend_names"], ["RRFSv2x", "RRFSv2b", "RRFSv2b - RRFSv2x"])
+                self.assertEqual(diff_meta["diff_legend_names"], ["RRFSv2b - RRFSv2x"])
             finally:
                 browser.close()
 

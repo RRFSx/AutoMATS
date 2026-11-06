@@ -521,6 +521,9 @@ class UpperAirBrowser:
         self._settle_controls()
         actual = next(parameter["value"] for parameter in self._parameters() if parameter["name"] == name)
         if actual != requested and actual != [requested]:
+            if name in {"dates", "curve-dates"} and isinstance(actual, str) and " - " in actual:
+                self.expected[name] = actual
+                return actual
             model = self.expected.get("data-source")
             context = f" for experiment {model!r}" if model else ""
             raise RunError(f"MATS did not accept {name}={requested!r}{context}: {actual!r}")
@@ -663,7 +666,15 @@ class UpperAirBrowser:
                         raise RunError(f"Duplicate or reserved MATS parameter: {name}")
                     assigned.add(parameter["name"])
                     self._set(name, value)
-                self._set(date_parameter, date_job.mats_dates, choice=False)
+                actual_dates = self._set(date_parameter, date_job.mats_dates, choice=False)
+                if actual_dates != date_job.mats_dates and isinstance(actual_dates, str) and " - " in actual_dates:
+                    try:
+                        s_part, e_part = actual_dates.split(" - ")
+                        c_start = datetime.strptime(s_part, "%m/%d/%Y %H:%M").replace(tzinfo=timezone.utc).isoformat()
+                        c_end = datetime.strptime(e_part, "%m/%d/%Y %H:%M").replace(tzinfo=timezone.utc).isoformat()
+                        date_job = replace(date_job, start=c_start, end=c_end)
+                    except Exception:
+                        pass
                 self._set("label", curve.label, choice=False)
                 if not self.page.evaluate("color => CSS.supports('color', color)", curve.color):
                     raise RunError(f"Invalid plot color: {curve.color!r}")

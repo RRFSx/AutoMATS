@@ -24,15 +24,15 @@ plots:
   statistic: [rmse]
   forecast lead time: [0]
 
-- name: ua_profile
-  application: "Upper Air"
-  plot_type: profile
-  truth: "RAOBs (Traditional)"
-  region: "HRRR domain"
-  matched_samples: true
-  variable: [T, RHobT, Wind]
-  statistic: [rmse+bias]
-  forecast lead time: [0, 3]
+#- name: ua_profile
+#  application: "Upper Air"
+#  plot_type: profile
+#  truth: "RAOBs (Traditional)"
+#  region: "HRRR domain"
+#  matched_samples: true
+#  variable: [T, RHobT, Wind]
+#  statistic: [rmse+bias]
+#  forecast lead time: [0, 3]
 
 slides:
 - plot group: sfc_tseries
@@ -41,18 +41,18 @@ slides:
   row1: [t2m_rmse_f000, td2m_rmse_f000]
   row2: [wind10m_rmse_f000]
 
-- plot group: ua_profile
-  title: Upper Air Profile f000, f003
-  number of rows: 2
-  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
-  row2: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]
-
-- plot group: ua_profile
-  title: Upper Air Profile f000
-  number of rows: 1
-  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
-
-- plot group: ua_profile
-  title: Upper Air Profile f003
-  number of rows: 1
-  row1: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]
+#- plot group: ua_profile
+#  title: Upper Air Profile f000, f003
+#  number of rows: 2
+#  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
+#  row2: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]
+#
+#- plot group: ua_profile
+#  title: Upper Air Profile f000
+#  number of rows: 1
+#  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
+#
+#- plot group: ua_profile
+#  title: Upper Air Profile f003
+#  number of rows: 1
+#  row1: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]

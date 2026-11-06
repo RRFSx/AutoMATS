@@ -325,7 +325,10 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
                     path = Path(job.relative_path)
                     short = path.stem[len(job.name) + 1:]
                     statistic = re.sub(r"[^A-Za-z0-9_+-]+", "_", job.statistic or "default").strip("_")
+                    var_prefix = job.variable_tag + "_"
+                    stem_without_var = short[len(var_prefix):] if short.casefold().startswith(var_prefix.casefold()) else short
                     names = {path.name.casefold(), path.stem.casefold(), short.casefold(),
+                             stem_without_var.casefold(),
                              path.relative_to(job.name).as_posix().casefold(),
                              job.variable_tag.casefold(), f"{job.variable_tag}_{statistic}".casefold()}
                     diff_free_names = {n.replace("+diff", "") for n in names}

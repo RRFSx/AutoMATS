@@ -9,7 +9,7 @@ from threading import Event, Lock, Thread
 import time
 
 from automats.config import load_plan
-from automats.runner import run_plan
+from automats.runner import figure_exists, run_plan
 from automats.slides import build_slides
 
 
@@ -105,6 +105,8 @@ def main(argv=None) -> int:
     local_mode = parser.add_mutually_exclusive_group()
     local_mode.add_argument("--metadata-only", action="store_true", help="Add metadata to older cached figures locally; never contact MATS")
     local_mode.add_argument("--slides-only", action="store_true", help="Build slides from existing PNG figures; never contact MATS")
+    parser.add_argument("--skip-existing", "--ignore-existing", action="store_true", dest="skip_existing",
+                        help="Skip generating figures that already exist in the output directory")
     parser.add_argument("--limit", type=int, help="Generate at most this many figures")
     browser_mode = parser.add_mutually_exclusive_group()
     browser_mode.add_argument("--headless", action="store_true", help="Run Chrome in headless background mode (default)")
@@ -114,6 +116,10 @@ def main(argv=None) -> int:
         parser.error("--limit must be at least 1")
     if args.slides_only and args.limit is not None:
         parser.error("--limit cannot be used with --slides-only")
+    if args.slides_only and args.skip_existing:
+        parser.error("--skip-existing cannot be used with --slides-only")
+    if args.metadata_only and args.skip_existing:
+        parser.error("--skip-existing cannot be used with --metadata-only")
     try:
         plan = load_plan(args.recipe)
         for warning in plan.warnings:
@@ -121,6 +127,8 @@ def main(argv=None) -> int:
         print(f"{len(plan.jobs)} figures; endpoint: {plan.settings.base_url}", flush=True)
         if args.plan:
             for job in plan.jobs:
+                if args.skip_existing and figure_exists(args.output_dir, job.relative_path):
+                    continue
                 print(args.output_dir / job.relative_path)
             if plan.slides:
                 print(f"{len(plan.slides)} slides: {args.output_dir / 'slides.pptx'}")
@@ -135,6 +143,7 @@ def main(argv=None) -> int:
         with ProgressDisplay(len(plan.jobs)) as progress:
             count = run_plan(plan, args.output_dir, args.limit, not args.show_browser,
                      metadata_only=args.metadata_only, show_browser=args.show_browser,
+                     skip_existing=args.skip_existing,
                      log=progress.log, status=progress.update)
             if plan.slides or plan.slide_error is not None:
                 if not args.metadata_only and args.limit is not None and args.limit < len(plan.jobs):

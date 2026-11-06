@@ -28,6 +28,21 @@ def is_png(image: bytes) -> bool:
     return image.startswith(PNG_SIGNATURE) and image.endswith(PNG_END)
 
 
+def figure_exists(root: Path, relative_path: str) -> bool:
+    target = root / relative_path
+    try:
+        size = target.stat().st_size
+        if size < len(PNG_SIGNATURE) + len(PNG_END):
+            return False
+        with open(target, "rb") as stream:
+            if stream.read(len(PNG_SIGNATURE)) != PNG_SIGNATURE:
+                return False
+            stream.seek(-len(PNG_END), os.SEEK_END)
+            return stream.read(len(PNG_END)) == PNG_END
+    except OSError:
+        return False
+
+
 class RunError(RuntimeError):
     pass
 
@@ -251,7 +266,8 @@ class QueryPacer:
 
 
 def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool = True,
-             log=print, *, metadata_only: bool = False, show_browser: bool = False, status=None) -> int:
+             log=print, *, metadata_only: bool = False, show_browser: bool = False, status=None,
+             skip_existing: bool = False) -> int:
     def report(message, completed=None, total=None, wait_seconds=None):
         if status is not None:
             try:
@@ -290,6 +306,12 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
             log("No cached figures need a metadata refresh" if metadata_only else
                 "No figures requested")
             return 0
+        if skip_existing:
+            existing_count = sum(1 for job in jobs if figure_exists(output, job.relative_path))
+            if existing_count == len(jobs):
+                report("All figures already exist", completed=len(jobs), total=len(jobs))
+                log(f"All {len(jobs)} figures already exist in {output}; skipping MATS queries")
+                return 0
         report("Starting browser automation", completed=0, total=len(jobs))
         with sync_playwright() as manager:
             local_only = metadata_only
@@ -314,6 +336,10 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
                     if limit is not None and saved >= limit:
                         break
                     label = Path(job.relative_path).name
+                    if skip_existing and figure_exists(output, job.relative_path):
+                        report(f"Skipping existing figure: {label}", completed=index, total=len(jobs))
+                        log(f"[{index}/{len(jobs)}] Skip existing: {job.relative_path}")
+                        continue
                     report(f"Preparing {label}", completed=index - 1, total=len(jobs))
                     if metadata_only:
                         report(f"Updating local image metadata: {label}")

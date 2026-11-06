@@ -213,5 +213,5 @@ slides:
 - plot group: Visibility_dieoff
   title: Visibility Dieoff BIAS
   number of rows: 2
-  row1: [csi_threshold1, csi_threshold3]
-  row2: [csi_threshold5, csi_threshold10]
+  row1: [bias_threshold1, bias_threshold3]
+  row2: [bias_threshold5, bias_threshold10]

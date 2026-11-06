@@ -106,13 +106,19 @@ Figure references match within the named plot group: exact names first,
 then unique partial matches. Missing or ambiguous references stop slide
 generation only; plotting continues. 
 
+Skip figures that already exist in the output directory (only query MATS for missing figures):
+
+```sh
+./run.sh recipes/baseline.yaml --skip-existing
+```
+
 Rebuild slides from existing PNGs without opening Chrome or contacting MATS:
 
 ```sh
 ./run.sh recipes/baseline.yaml --slides-only
 ```
 
-This still a valid recipe and every referenced PNG in the output
+This still requires a valid recipe and every referenced PNG in the output
 directory. 
 
 ## Server Protection

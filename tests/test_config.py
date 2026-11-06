@@ -154,6 +154,65 @@ class ConfigTests(unittest.TestCase):
             "sfc_tseries/sfc_tseries_wind10m_rmse_f000.png",
         ])
 
+    def test_exclude_and_include_experiment_per_plot(self):
+        raw = example()
+        raw["experiments"] = [
+            {"name": "EXP_A", "color": "red", "overlay": True},
+            {"name": "EXP_B", "color": "blue", "overlay": True},
+            {"name": "EXP_C", "color": "orange", "overlay": True},
+        ]
+        raw["plots"] = [
+            {
+                "name": "all_exps",
+                "application": "surface",
+                "plot_type": "dieoff",
+                "variable": ["t2m"],
+                "statistic": ["rmse"],
+            },
+            {
+                "name": "exclude_c",
+                "exclude experiment": ["EXP_C"],
+                "application": "Radar (MRMS)",
+                "plot_type": "die off",
+                "variable": ["Composite Reflectivity"],
+                "Threshold": [25],
+                "statistic": ["CSI"],
+            },
+            {
+                "name": "include_b",
+                "include experiment": "EXP_B",
+                "application": "surface",
+                "plot_type": "dieoff",
+                "variable": ["t2m"],
+                "statistic": ["rmse"],
+            },
+        ]
+        plan = build_plan(raw)
+        jobs = {job.name: job for job in plan.jobs}
+        self.assertEqual([e.name for e in jobs["all_exps"].experiments], ["EXP_A", "EXP_B", "EXP_C"])
+        self.assertEqual([e.name for e in jobs["exclude_c"].experiments], ["EXP_A", "EXP_B"])
+        self.assertEqual([e.name for e in jobs["include_b"].experiments], ["EXP_B"])
+        # Ensure exclude experiment is not part of filename parameter tags
+        self.assertEqual(jobs["exclude_c"].relative_path,
+                         "exclude_c/exclude_c_composite_reflectivity_csi_threshold25.png")
+
+        # Unknown experiment
+        bad = deepcopy(raw)
+        bad["plots"][1]["exclude experiment"] = ["NONEXISTENT"]
+        with self.assertRaisesRegex(ConfigError, "does not match any configured experiment"):
+            build_plan(bad)
+
+        # Exclude all experiments
+        bad["plots"][1]["exclude experiment"] = ["EXP_A", "EXP_B", "EXP_C"]
+        with self.assertRaisesRegex(ConfigError, "all experiments were excluded"):
+            build_plan(bad)
+
+        # Mutually exclusive spelling
+        bad = deepcopy(raw)
+        bad["plots"][1]["exclude_experiments"] = ["EXP_C"]
+        with self.assertRaisesRegex(ConfigError, "Use only one exclude experiment spelling"):
+            build_plan(bad)
+
     def test_readable_parameter_tags_are_safe_stable_and_keep_numeric_signs(self):
         raw = example()
         raw["plots"][0].update({"variable": ["T"], "statistic": ["rmse"],

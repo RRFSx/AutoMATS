@@ -277,7 +277,7 @@ class PacingTests(unittest.TestCase):
         self.assertEqual(self.clock.waits, [1])
 
     def test_ten_second_gap_follows_short_and_long_plots_and_keeps_cooldown(self):
-        pacer = QueryPacer(Settings(minimum_waiting_seconds=10), self.clock.clock, self.clock.wait)
+        pacer = QueryPacer(Settings(inter_plot_waiting_seconds=10), self.clock.clock, self.clock.wait)
         pacer.before_query()
         self.clock.now += 4
         pacer.after_plot()
@@ -375,7 +375,7 @@ class ResultTests(unittest.TestCase):
 
     def test_runner_waits_ten_seconds_after_a_long_plot_not_after_final_plot(self):
         plan = replace(self.plan, jobs=self.plan.jobs[:2],
-                       settings=replace(self.plan.settings, minimum_waiting_seconds=10))
+                       settings=replace(self.plan.settings, inter_plot_waiting_seconds=10))
         clock = FakeClock()
         pacer = QueryPacer(plan.settings, clock.clock, clock.wait)
         starts = []
@@ -962,6 +962,35 @@ class ControlPacingTests(unittest.TestCase):
         self.assertEqual(self.client._set("label", "next"), "next")
         self.assertAlmostEqual(self.clock.now, 0.2)
         self.assertEqual(self.client.expected, {"label": "next"})
+
+    def test_difference_curves_parameter_resolution_and_setting(self):
+        from automats.browser import CONTROLS_READY
+
+        self.client.application = "surface"
+        self.client.expected = {}
+        plot_format_param = {
+            "name": "plotFormat", "label": "Difference Curves", "disabled": False,
+            "type": "select", "scope": "plot", "value": "none",
+            "options": [
+                {"value": "none", "label": "none"},
+                {"value": "Diff all curves against the 1st added curve", "label": "Diff all curves against the 1st added curve"},
+                {"value": "Diff the 1st and 2nd curves, 3rd and 4th, etc", "label": "Diff the 1st and 2nd curves, 3rd and 4th, etc"},
+            ],
+        }
+        self.client._parameters = Mock(return_value=[plot_format_param])
+        self.client.page.evaluate.side_effect = lambda script, *args: True if script == CONTROLS_READY else None
+        resolved = self.client._resolve_parameter("Difference curves")
+        self.assertEqual(resolved["name"], "plotFormat")
+        self.assertEqual(self.client._resolve_parameter("diff")["name"], "plotFormat")
+        self.assertEqual(self.client._resolve_parameter("difference_curves")["name"], "plotFormat")
+
+        # Set difference curves using alias
+        self.client._parameters = Mock(return_value=[{
+            **plot_format_param, "value": "Diff all curves against the 1st added curve"
+        }])
+        actual = self.client._set("Difference curves", "Diff all curves against the 1st added curve")
+        self.assertEqual(actual, "Diff all curves against the 1st added curve")
+        self.assertEqual(self.client.expected["plotFormat"], "Diff all curves against the 1st added curve")
 
     def test_dependent_value_changes_restart_the_stable_interval(self):
         self.client._parameters.side_effect = lambda: [

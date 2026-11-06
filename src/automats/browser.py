@@ -285,7 +285,15 @@ PARAMETERS = """() => {
             Array.from(element.selectedOptions).map(option => option.value) : element.value;
         else if (parameter?.type === 'dateRange') current = matsParamUtils.getValueForParamName(name);
         else if (element && 'value' in element) current = element.value;
-        return {name, label:parameter?.label || parameter?.text || name, type:parameter?.type,
+        let label = parameter?.label || parameter?.text;
+        if (!label) {
+            try {
+                const itemBtn = document.querySelector('#' + name + '-item .control-button, #' + name + '-item button, #' + name + '-item label');
+                if (itemBtn) label = itemBtn.textContent.trim();
+            } catch (_) {}
+        }
+        if (!label && name === 'plotFormat') label = 'Difference Curves';
+        return {name, label:label || name, type:parameter?.type,
             value:current, options, disabled:!!element?.disabled,
             scope:name in values.curveParams ? 'curve' : 'plot'};
     });
@@ -479,7 +487,16 @@ class UpperAirBrowser:
 
     def _resolve_parameter(self, name: str) -> dict:
         parameters = self._parameters()
-        aliases = {"forecast lead time": "forecast-length"}
+        aliases = {
+            "forecast lead time": "forecast-length",
+            "difference curves": "plotFormat",
+            "difference_curves": "plotFormat",
+            "difference-curves": "plotFormat",
+            "diff curves": "plotFormat",
+            "diff_curves": "plotFormat",
+            "diff": "plotFormat",
+            "difference": "plotFormat",
+        }
         if self.application == "upperair":
             aliases["truth"] = "database"
         try:
@@ -506,6 +523,19 @@ class UpperAirBrowser:
                 aliases = {key: label for key, (label, tag) in VARIABLES.items()}
             elif name == "statistic" and self.application in {"surface", "upperair"}:
                 aliases = STATISTICS
+            elif name == "plotFormat":
+                aliases = {
+                    "none": "none",
+                    "false": "none",
+                    "diff": "Diff all curves against the 1st added curve",
+                    "diff all": "Diff all curves against the 1st added curve",
+                    "diff all curves": "Diff all curves against the 1st added curve",
+                    "diff all curves against the 1st added curve": "Diff all curves against the 1st added curve",
+                    "true": "Diff all curves against the 1st added curve",
+                    "pairwise": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
+                    "diff pairwise": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
+                    "diff the 1st and 2nd curves, 3rd and 4th, etc": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
+                }
             candidates = [option["value"] for option in options]
             try:
                 selected = resolve_option(requested, candidates, name, aliases)
@@ -661,6 +691,8 @@ class UpperAirBrowser:
                 assigned = set(self.expected)
                 for name, value in job.parameters:
                     parameter = self._resolve_parameter(name)
+                    if parameter["scope"] == "plot":
+                        continue
                     if parameter["name"] in assigned or parameter["name"] in {
                             "data-source", "label", "curve-dates", "plot-dates", "color"}:
                         raise RunError(f"Duplicate or reserved MATS parameter: {name}")
@@ -713,6 +745,10 @@ class UpperAirBrowser:
         validate_effective_curves(self.curves, requested_curves)
         effective_curves = [{name: curve.get(name, value) for name, value in defaults.items()}
                     for curve, defaults in zip(self.curves, default_curves)]
+        for name, value in job.parameters:
+            parameter = self._resolve_parameter(name)
+            if parameter["scope"] == "plot":
+                self._set(name, value)
         plot_parameters = self._snapshot()["plotParams"]
         self.effective_settings = {"application": self.application, "application_title": selected["title"],
                    "application_url": self.url, "plot_type": plot_type,

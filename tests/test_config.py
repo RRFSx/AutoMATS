@@ -119,6 +119,41 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(job.relative_path, "ua_dieoff/ua_dieoff_T_rmse_f000.png")
         self.assertEqual(job.lead_tag, "f000")
 
+    def test_difference_curves_filename_and_slide_matching(self):
+        raw = example()
+        raw["plots"] = [{
+            "name": "sfc_tseries",
+            "application": "surface",
+            "plot_type": "time series",
+            "variable": ["t2m", "wind10m"],
+            "statistic": ["rmse"],
+            "forecast lead time": [0],
+            "Difference curves": "Diff all curves against the 1st added curve",
+        }]
+        raw["slides"] = [{
+            "plot group": "sfc_tseries",
+            "number of rows": 1,
+            "row1": ["t2m_rmse_f000", "wind10m_rmse+diff_f000"],
+        }]
+        plan = build_plan(raw)
+        self.assertEqual(len(plan.jobs), 2)
+        paths = [job.relative_path for job in plan.jobs]
+        self.assertEqual(paths, [
+            "sfc_tseries/sfc_tseries_t2m_rmse+diff_f000.png",
+            "sfc_tseries/sfc_tseries_wind10m_rmse+diff_f000.png",
+        ])
+        self.assertEqual(plan.slides[0].rows, (
+            ("sfc_tseries/sfc_tseries_t2m_rmse+diff_f000.png",
+             "sfc_tseries/sfc_tseries_wind10m_rmse+diff_f000.png"),
+        ))
+        # Test disabled difference curves
+        raw["plots"][0]["Difference curves"] = "none"
+        plan_none = build_plan(raw)
+        self.assertEqual([job.relative_path for job in plan_none.jobs], [
+            "sfc_tseries/sfc_tseries_t2m_rmse_f000.png",
+            "sfc_tseries/sfc_tseries_wind10m_rmse_f000.png",
+        ])
+
     def test_readable_parameter_tags_are_safe_stable_and_keep_numeric_signs(self):
         raw = example()
         raw["plots"][0].update({"variable": ["T"], "statistic": ["rmse"],
@@ -151,18 +186,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(len(plan.jobs), 84)
         self.assertEqual({job.name for job in plan.jobs}, {"ua_profile", "second_profile"})
 
-    def test_minimum_waiting_seconds_and_one_second_default(self):
+    def test_inter_plot_waiting_seconds_and_one_second_default(self):
         raw = example()
-        raw["automation"] = {"minimum waiting seconds": 10}
+        raw["automation"] = {"inter-plot waiting seconds": 10}
         preferred = build_plan(raw).settings
-        self.assertEqual(preferred.minimum_waiting_seconds, 10)
+        self.assertEqual(preferred.inter_plot_waiting_seconds, 10)
         raw["automation"] = {}
-        self.assertEqual(build_plan(raw).settings.minimum_waiting_seconds, 1)
-        raw["automation"] = {"minimum waiting seconds": 5}
-        self.assertEqual(build_plan(raw).settings.minimum_waiting_seconds, 5)
+        self.assertEqual(build_plan(raw).settings.inter_plot_waiting_seconds, 1)
+        raw["automation"] = {"inter-plot waiting seconds": 5}
+        self.assertEqual(build_plan(raw).settings.inter_plot_waiting_seconds, 5)
         for value in (1, 1.5, 4, 86400):
-            raw["automation"] = {"minimum waiting seconds": value}
-            self.assertEqual(build_plan(raw).settings.minimum_waiting_seconds, value)
+            raw["automation"] = {"inter-plot waiting seconds": value}
+            self.assertEqual(build_plan(raw).settings.inter_plot_waiting_seconds, value)
 
     def test_control_waiting_seconds_default_and_overrides_are_independent(self):
         raw = example()
@@ -172,7 +207,7 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=value):
                 settings = build_plan(raw).settings
                 self.assertEqual(settings.control_waiting_seconds, value)
-                self.assertEqual(settings.minimum_waiting_seconds, 1)
+                self.assertEqual(settings.inter_plot_waiting_seconds, 1)
                 self.assertEqual(settings.cooldown_seconds, 180)
 
     def test_control_waiting_seconds_rejects_invalid_values(self):
@@ -182,13 +217,13 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ConfigError, "control waiting seconds"):
                 build_plan(raw)
 
-    def test_minimum_waiting_seconds_rejects_invalid_values_and_old_keys(self):
+    def test_inter_plot_waiting_seconds_rejects_invalid_values_and_old_keys(self):
         for value in (0, 0.9, -1, 86401, True, "10", float("nan"), float("inf")):
             raw = example()
-            raw["automation"] = {"minimum waiting seconds": value}
+            raw["automation"] = {"inter-plot waiting seconds": value}
             with self.subTest(value=value), self.assertRaises(ConfigError):
                 build_plan(raw)
-        for key in ("min_waiting_time", "min_interval_seconds"):
+        for key in ("minimum waiting seconds", "min_waiting_time", "min_interval_seconds"):
             raw["automation"] = {key: 10}
             with self.subTest(key=key), self.assertRaisesRegex(ConfigError, "Unknown automation options"):
                 build_plan(raw)
@@ -485,9 +520,9 @@ class ConfigTests(unittest.TestCase):
                 build_plan(raw)
 
     def test_cannot_disable_pacing_or_set_unbounded_retries(self):
-        for settings in ({"minimum waiting seconds": 0}, {"minimum waiting seconds": 0.9},
+        for settings in ({"inter-plot waiting seconds": 0}, {"inter-plot waiting seconds": 0.9},
                  {"cooldown_seconds": 10},
-                         {"max_attempts": 10}, {"minimum waiting seconds": float("nan")}):
+                         {"max_attempts": 10}, {"inter-plot waiting seconds": float("nan")}):
             raw = example()
             raw["automation"] = settings
             with self.assertRaises(ConfigError):
@@ -495,12 +530,12 @@ class ConfigTests(unittest.TestCase):
 
     def test_explicit_wait_preserves_one_second_default(self):
         raw = example()
-        raw["automation"] = {"minimum waiting seconds": 10}
+        raw["automation"] = {"inter-plot waiting seconds": 10}
         settings = build_plan(raw).settings
-        self.assertEqual(settings.minimum_waiting_seconds, 10)
+        self.assertEqual(settings.inter_plot_waiting_seconds, 10)
         self.assertEqual(settings.cooldown_seconds, 180)
         raw.pop("automation")
-        self.assertEqual(build_plan(raw).settings.minimum_waiting_seconds, 1)
+        self.assertEqual(build_plan(raw).settings.inter_plot_waiting_seconds, 1)
 
 
 if __name__ == "__main__":

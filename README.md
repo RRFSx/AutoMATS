@@ -119,7 +119,7 @@ directory.
 
 - One Chrome session and one plot query at a time; no parallel plotting.
 - A 3-second wait after a completed plot by default;
-  `automation.minimum waiting seconds` accepts customizations. 
+  `automation.inter-plot waiting seconds` accepts customizations. 
 - Parameter changes and Add Curve wait for controls to remain stable for
   0.3 seconds by default, including pending metadata updates.
 - A user-wide process lock prevents concurrent AutoMATS runs on the same machine.
@@ -130,7 +130,7 @@ Configure the wait in your recipe's existing `automation` section:
 
 ```yaml
 automation:
-  minimum waiting seconds: 3
+  inter-plot waiting seconds: 3
   control waiting seconds: 0.3
 ```
 

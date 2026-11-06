@@ -161,7 +161,7 @@ class PlotJob:
 
 @dataclass(frozen=True)
 class Settings:
-    minimum_waiting_seconds: float = 1
+    inter_plot_waiting_seconds: float = 1
     cooldown_seconds: float = 180
     max_attempts: int = 3
     base_url: str = "https://gsl.noaa.gov/mats"
@@ -235,6 +235,20 @@ def _date(value: Any, context: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+def _is_diff_curve_param(param_name: str) -> bool:
+    norm = re.sub(r"[\s_-]+", "", param_name.casefold())
+    return norm in {"differencecurves", "diffcurves", "diff", "plotformat"}
+
+
+def _is_diff_curve_enabled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if not value:
+        return False
+    norm = str(value).strip().casefold()
+    return norm not in {"none", "false", "0", "no"}
+
+
 def _safe_name(value: Any, context: str) -> str:
     value = _text(value, context)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
@@ -244,17 +258,17 @@ def _safe_name(value: Any, context: str) -> str:
 
 def _settings(raw: Any) -> Settings:
     raw = _mapping(raw, "automation")
-    allowed = {"minimum waiting seconds", "cooldown_seconds", "max_attempts", "base_url", "control waiting seconds"}
+    allowed = {"inter-plot waiting seconds", "cooldown_seconds", "max_attempts", "base_url", "control waiting seconds"}
     if set(raw) - allowed:
         raise ConfigError(f"Unknown automation options: {sorted(set(raw) - allowed)}")
     base_url = _text(raw.get("base_url", "https://gsl.noaa.gov/mats"), "base_url").rstrip("/")
     if base_url not in {"https://gsl.noaa.gov/mats", "https://gsl.noaa.gov/int-mats"}:
         raise ConfigError("base_url must be https://gsl.noaa.gov/mats or https://gsl.noaa.gov/int-mats")
-    waiting_seconds = raw.get("minimum waiting seconds", 1)
+    waiting_seconds = raw.get("inter-plot waiting seconds", 1)
     control_waiting_seconds = raw.get("control waiting seconds", 0.2)
     cooldown = raw.get("cooldown_seconds", 180)
     attempts = raw.get("max_attempts", 3)
-    for value, minimum, name in ((waiting_seconds, 1, "minimum waiting seconds"),
+    for value, minimum, name in ((waiting_seconds, 1, "inter-plot waiting seconds"),
                                  (cooldown, 180, "cooldown_seconds")):
         if type(value) not in (int, float) or not minimum <= value <= 86400:
             raise ConfigError(f"{name} must be between {minimum} and 86400")
@@ -305,6 +319,7 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
                 original = _text(reference, f"{context}.row{number} figure")
                 reference = original.casefold()
                 exact = []
+                exact_diff_stripped = []
                 partial = []
                 for job in candidates:
                     path = Path(job.relative_path)
@@ -315,9 +330,15 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
                              job.variable_tag.casefold(), f"{job.variable_tag}_{statistic}".casefold()}
                     if reference in names:
                         exact.append(job)
+                    elif "+diff" in short and reference in {
+                        short.replace("+diff", "").casefold(),
+                        path.stem.replace("+diff", "").casefold(),
+                        path.name.replace("+diff", "").casefold(),
+                    }:
+                        exact_diff_stripped.append(job)
                     elif any(reference in name for name in names):
                         partial.append(job)
-                matches = exact or partial
+                matches = exact or exact_diff_stripped or partial
                 if len(matches) != 1:
                     detail = "ambiguous" if matches else "unknown"
                     choices = ", ".join(job.relative_path for job in matches or candidates)
@@ -432,6 +453,10 @@ def build_plan(raw: Any) -> Plan:
                 statistic_tag = re.sub(r"[^A-Za-z0-9_+-]+", "_", statistic or "default").strip("_")
                 parameter_tags = []
                 for parameter, value in zip(extra_keys, extras):
+                    if _is_diff_curve_param(parameter):
+                        if _is_diff_curve_enabled(value) and "+diff" not in statistic_tag:
+                            statistic_tag = f"{statistic_tag}+diff"
+                        continue
                     key_tag = re.sub(r"[^a-z0-9]+", "", parameter.casefold())
                     value_tag = re.sub(r"[^a-z0-9.+-]+", "_", str(value).strip().casefold()).strip("_")
                     if not key_tag or not value_tag:

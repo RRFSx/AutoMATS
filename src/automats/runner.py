@@ -230,12 +230,12 @@ class QueryPacer:
 
     def before_query(self) -> None:
         self.wait_ready()
-        self.next_start = self.clock() + self.settings.minimum_waiting_seconds
+        self.next_start = self.clock() + self.settings.inter_plot_waiting_seconds
         self.wait_reason = "Minimum wait between plots"
         self._persist()
 
     def after_plot(self) -> None:
-        deadline = self.clock() + self.settings.minimum_waiting_seconds
+        deadline = self.clock() + self.settings.inter_plot_waiting_seconds
         if deadline >= self.next_start:
             self.next_start = deadline
             self.wait_reason = "Minimum wait between plots"

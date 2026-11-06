@@ -7,7 +7,7 @@ experiments:
   color: blue
 
 automation:
-  minimum waiting seconds: 3
+  inter-plot waiting seconds: 3
   control waiting seconds: 0.5
 
 common:
@@ -23,6 +23,7 @@ plots:
   variable: [t2m, td2m, wind10m]
   statistic: [rmse]
   forecast lead time: [0]
+  Difference curves: "Diff all curves against the 1st added curve"
 
 #- name: ua_profile
 #  application: "Upper Air"

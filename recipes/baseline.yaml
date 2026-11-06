@@ -21,7 +21,7 @@ experiments:
 # detailed recipes
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 automation:
-  minimum waiting seconds: 3 
+  inter-plot waiting seconds: 3 
   control waiting seconds: 0.3  # pesudo "mouse click" intervals, 300ms 
   #base_url: "https://gsl.noaa.gov/int-mats"  # When the official MATS is down
 
@@ -123,12 +123,6 @@ slides:
   row2: [wind10m_bias_f001]
 
 # -----  upper air slides ------
-- plot group: ua_dieoff
-  title: Upper Air Dieoff
-  number of rows: 2
-  row1: [T, RHobT]
-  row2: [Wind]
-
 - plot group: ua_dieoff
   title: Upper Air Dieoff
   number of rows: 2

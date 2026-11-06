@@ -8,4 +8,5 @@ dist/
 .automats-state.json
 figures/
 results
+tmp/
 .DS_Store

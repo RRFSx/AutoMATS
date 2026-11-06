@@ -161,7 +161,7 @@ class PlotJob:
 
 @dataclass(frozen=True)
 class Settings:
-    minimum_waiting_seconds: float = 1
+    inter_plot_waiting_seconds: float = 1
     cooldown_seconds: float = 180
     max_attempts: int = 3
     base_url: str = "https://gsl.noaa.gov/mats"
@@ -235,6 +235,20 @@ def _date(value: Any, context: str) -> str:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+def _is_diff_curve_param(param_name: str) -> bool:
+    norm = re.sub(r"[\s_-]+", "", param_name.casefold())
+    return norm in {"differencecurves", "diffcurves", "diff", "plotformat"}
+
+
+def _is_diff_curve_enabled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if not value:
+        return False
+    norm = str(value).strip().casefold()
+    return norm not in {"none", "false", "0", "no"}
+
+
 def _safe_name(value: Any, context: str) -> str:
     value = _text(value, context)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
@@ -244,17 +258,17 @@ def _safe_name(value: Any, context: str) -> str:
 
 def _settings(raw: Any) -> Settings:
     raw = _mapping(raw, "automation")
-    allowed = {"minimum waiting seconds", "cooldown_seconds", "max_attempts", "base_url", "control waiting seconds"}
+    allowed = {"inter-plot waiting seconds", "cooldown_seconds", "max_attempts", "base_url", "control waiting seconds"}
     if set(raw) - allowed:
         raise ConfigError(f"Unknown automation options: {sorted(set(raw) - allowed)}")
     base_url = _text(raw.get("base_url", "https://gsl.noaa.gov/mats"), "base_url").rstrip("/")
     if base_url not in {"https://gsl.noaa.gov/mats", "https://gsl.noaa.gov/int-mats"}:
         raise ConfigError("base_url must be https://gsl.noaa.gov/mats or https://gsl.noaa.gov/int-mats")
-    waiting_seconds = raw.get("minimum waiting seconds", 1)
+    waiting_seconds = raw.get("inter-plot waiting seconds", 1)
     control_waiting_seconds = raw.get("control waiting seconds", 0.2)
     cooldown = raw.get("cooldown_seconds", 180)
     attempts = raw.get("max_attempts", 3)
-    for value, minimum, name in ((waiting_seconds, 1, "minimum waiting seconds"),
+    for value, minimum, name in ((waiting_seconds, 1, "inter-plot waiting seconds"),
                                  (cooldown, 180, "cooldown_seconds")):
         if type(value) not in (int, float) or not minimum <= value <= 86400:
             raise ConfigError(f"{name} must be between {minimum} and 86400")
@@ -294,30 +308,37 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
             raise ConfigError(f"{context}: unknown options {sorted(unknown)}; use number of rows")
         title = _text(item.get("title", candidates[0].name), f"{context}.title")
         rows = []
-        captions = []
+        slide_parts = []
         for number in range(1, count + 1):
             references = item.get(f"row{number}")
             if not isinstance(references, list) or not references:
                 raise ConfigError(f"{context}.row{number} must be a nonempty list")
             resolved = []
-            row_captions = []
+            row_parts = []
             for reference in references:
                 original = _text(reference, f"{context}.row{number} figure")
                 reference = original.casefold()
                 exact = []
+                exact_diff_stripped = []
                 partial = []
                 for job in candidates:
                     path = Path(job.relative_path)
                     short = path.stem[len(job.name) + 1:]
                     statistic = re.sub(r"[^A-Za-z0-9_+-]+", "_", job.statistic or "default").strip("_")
+                    var_prefix = job.variable_tag + "_"
+                    stem_without_var = short[len(var_prefix):] if short.casefold().startswith(var_prefix.casefold()) else short
                     names = {path.name.casefold(), path.stem.casefold(), short.casefold(),
+                             stem_without_var.casefold(),
                              path.relative_to(job.name).as_posix().casefold(),
                              job.variable_tag.casefold(), f"{job.variable_tag}_{statistic}".casefold()}
+                    diff_free_names = {n.replace("+diff", "") for n in names}
                     if reference in names:
                         exact.append(job)
-                    elif any(reference in name for name in names):
+                    elif reference in diff_free_names:
+                        exact_diff_stripped.append(job)
+                    elif any(reference in name for name in names | diff_free_names):
                         partial.append(job)
-                matches = exact or partial
+                matches = exact or exact_diff_stripped or partial
                 if len(matches) != 1:
                     detail = "ambiguous" if matches else "unknown"
                     choices = ", ".join(job.relative_path for job in matches or candidates)
@@ -328,10 +349,21 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
                 prefix = matches[0].name + "_"
                 if caption.casefold().startswith(prefix.casefold()):
                     caption = caption[len(prefix):]
-                row_captions.append(caption.split("_", 1)[0])
+                row_parts.append(caption.split("_"))
             rows.append(tuple(resolved))
-            captions.append(tuple(row_captions))
-        slides.append(SlideSpec(candidates[0].name, title, tuple(rows), tuple(captions)))
+            slide_parts.append(row_parts)
+
+        all_parts = [p for row in slide_parts for p in row]
+        use_second_section = (
+            len(all_parts) > 1
+            and all(len(p) >= 2 for p in all_parts)
+            and len({p[0].casefold() for p in all_parts}) == 1
+        )
+        captions = tuple(
+            tuple(p[1] if use_second_section else p[0] for p in row)
+            for row in slide_parts
+        )
+        slides.append(SlideSpec(candidates[0].name, title, tuple(rows), captions))
     return tuple(slides)
 
 
@@ -364,20 +396,77 @@ def build_plan(raw: Any) -> Plan:
         experiments.append(Experiment(name, color, overlay))
     if len({item.name for item in experiments}) != len(experiments):
         notices.append("Repeated experiment names: these entries query the same MATS model, not different experiments.")
-    groups = []
-    overlaid = tuple(item for item in experiments if item.overlay)
-    if overlaid:
-        groups.append(("", overlaid))
-    for index, experiment in enumerate(experiments, 1):
-        if not experiment.overlay:
-            slug = re.sub(r"[^A-Za-z0-9_-]+", "_", experiment.label).strip("_") or "experiment"
-            groups.append((f"{slug}-{index}", (experiment,)))
     jobs = []
     paths = set()
     for item in _choices(raw.get("plots"), "plots"):
         item = _mapping(item, "plot")
-        reserved = {"name", "application", "plot_type", "truth", "region", "matched_samples",
-                   "variable", "statistic", "forecast lead time", "forecast_lead_time", "forecast lead colors"}
+        name = _safe_name(item.get("name"), "plot.name")
+        reserved = {
+            "name", "application", "plot_type", "truth", "region", "matched_samples",
+            "variable", "statistic", "forecast lead time", "forecast_lead_time",
+            "forecast lead colors", "exclude experiment", "exclude experiments",
+            "exclude_experiment", "exclude_experiments",
+            "include experiment", "include experiments",
+            "include_experiment", "include_experiments",
+        }
+        exclude_keys = [k for k in ("exclude experiment", "exclude experiments",
+                                    "exclude_experiment", "exclude_experiments") if k in item]
+        include_keys = [k for k in ("include experiment", "include experiments",
+                                    "include_experiment", "include_experiments") if k in item]
+        if len(exclude_keys) > 1:
+            raise ConfigError(f"Use only one exclude experiment spelling in plot {name!r}")
+        if len(include_keys) > 1:
+            raise ConfigError(f"Use only one include experiment spelling in plot {name!r}")
+        if exclude_keys and include_keys:
+            raise ConfigError(f"Use either include experiment or exclude experiment in plot {name!r}, not both")
+
+        plot_experiments = list(experiments)
+        normalize = lambda s: re.sub(r"[\s_-]+", "", s.casefold())
+        if exclude_keys:
+            raw_excluded = item[exclude_keys[0]]
+            excluded_names = [_text(val, f"plot {name!r} {exclude_keys[0]}")
+                              for val in _choices(raw_excluded, exclude_keys[0])]
+            to_exclude = set()
+            for val in excluded_names:
+                norm_val = normalize(val)
+                matches = [exp for exp in experiments if norm_val in {normalize(exp.name), normalize(exp.label)}]
+                if not matches:
+                    continue
+                if len(matches) > 1:
+                    matched_names = [exp.name for exp in matches]
+                    raise ConfigError(f"Plot {name!r}: exclude experiment {val!r} is ambiguous: {matched_names}")
+                to_exclude.add(matches[0])
+            plot_experiments = [exp for exp in experiments if exp not in to_exclude]
+            if not plot_experiments:
+                raise ConfigError(f"Plot {name!r}: all experiments were excluded; at least one experiment must remain")
+        elif include_keys:
+            raw_included = item[include_keys[0]]
+            included_names = [_text(val, f"plot {name!r} {include_keys[0]}")
+                              for val in _choices(raw_included, include_keys[0])]
+            to_include = set()
+            for val in included_names:
+                norm_val = normalize(val)
+                matches = [exp for exp in experiments if norm_val in {normalize(exp.name), normalize(exp.label)}]
+                if not matches:
+                    available = [exp.name for exp in experiments]
+                    raise ConfigError(f"Plot {name!r}: include experiment {val!r} does not match any configured experiment: {available}")
+                if len(matches) > 1:
+                    matched_names = [exp.name for exp in matches]
+                    raise ConfigError(f"Plot {name!r}: include experiment {val!r} is ambiguous: {matched_names}")
+                to_include.add(matches[0])
+            plot_experiments = [exp for exp in experiments if exp in to_include]
+            if not plot_experiments:
+                raise ConfigError(f"Plot {name!r}: no configured experiments match include experiment")
+
+        plot_groups = []
+        plot_overlaid = tuple(exp for exp in plot_experiments if exp.overlay)
+        if plot_overlaid:
+            plot_groups.append(("", plot_overlaid))
+        for index, experiment in enumerate(plot_experiments, 1):
+            if not experiment.overlay:
+                slug = re.sub(r"[^A-Za-z0-9_-]+", "_", experiment.label).strip("_") or "experiment"
+                plot_groups.append((f"{slug}-{index}", (experiment,)))
+
         extra_keys = sorted(set(item) - reserved)
         extra_values = []
         for key in extra_keys:
@@ -387,7 +476,6 @@ def build_plan(raw: Any) -> Plan:
                    isinstance(value, str) and not value.strip() for value in values):
                 raise ConfigError(f"{key} must contain scalar parameter values")
             extra_values.append(values)
-        name = _safe_name(item.get("name"), "plot.name")
         application_name = _text(item.get("application"), "application")
         application = APPLICATION_ALIASES.get(application_name.casefold(), application_name)
         plot_type = _text(item.get("plot_type"), "plot_type").casefold()
@@ -427,11 +515,15 @@ def build_plan(raw: Any) -> Plan:
         if "forecast lead colors" in item and grouped_leads - colors.keys():
             raise ConfigError(f"forecast lead colors missing grouped leads: {sorted(grouped_leads - colors.keys())}")
         for (variable, tag), statistic, lead, extras in product(variables, stats, leads, product(*extra_values)):
-            selected_groups = [("", (experiments[0],))] if isinstance(lead, tuple) else groups
+            selected_groups = [("", (plot_experiments[0],))] if isinstance(lead, tuple) else plot_groups
             for group, curves in selected_groups:
                 statistic_tag = re.sub(r"[^A-Za-z0-9_+-]+", "_", statistic or "default").strip("_")
                 parameter_tags = []
                 for parameter, value in zip(extra_keys, extras):
+                    if _is_diff_curve_param(parameter):
+                        if _is_diff_curve_enabled(value) and "+diff" not in statistic_tag:
+                            statistic_tag = f"{statistic_tag}+diff"
+                        continue
                     key_tag = re.sub(r"[^a-z0-9]+", "", parameter.casefold())
                     value_tag = re.sub(r"[^a-z0-9.+-]+", "_", str(value).strip().casefold()).strip("_")
                     if not key_tag or not value_tag:
@@ -449,7 +541,7 @@ def build_plan(raw: Any) -> Plan:
                                     if isinstance(lead, tuple) and colors else (), application=application,
                                     parameters=tuple(zip(extra_keys, extras)),
                                     line_weight=line_weight, marker_weight=marker_weight,
-                                    default_date_experiment=experiments[0].name
+                                    default_date_experiment=plot_experiments[0].name
                                     if start is None or end is None else None))
     planned_jobs = tuple(jobs)
     slide_error = None

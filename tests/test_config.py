@@ -21,6 +21,79 @@ def example():
 
 
 class ConfigTests(unittest.TestCase):
+    def test_slides_disambiguate_captions_using_second_section(self):
+        raw = example()
+        raw["plots"] = [
+            {
+                "name": "ceiling_dieoff",
+                "application": "Ceiling and Visibility",
+                "plot_type": "die off",
+                "region": "All HRRR domain",
+                "matched_samples": True,
+                "variable": ["ceiling"],
+                "Threshold": [500, 1000, 3000, 6000],
+                "statistic": ["CSI", "BIAS"],
+            },
+            {
+                "name": "visibility_dieoff",
+                "application": "Ceiling and Visibility",
+                "plot_type": "die off",
+                "region": "All HRRR domain",
+                "matched_samples": True,
+                "variable": ["visibility"],
+                "Threshold": [1, 3, 5, 10],
+                "statistic": ["CSI", "BIAS"],
+            },
+        ]
+        raw["slides"] = [
+            {
+                "plot group": "ceiling_dieoff",
+                "title": "Ceiling Dieoff CSI",
+                "number of rows": 2,
+                "row1": ["csi_threshold500", "csi_threshold1000"],
+                "row2": ["csi_threshold3000", "csi_threshold6000"],
+            },
+            {
+                "plot group": "ceiling_dieoff",
+                "title": "Ceiling Dieoff BIAS",
+                "number of rows": 2,
+                "row1": ["bias_threshold500", "bias_threshold1000"],
+                "row2": ["bias_threshold3000", "bias_threshold6000"],
+            },
+            {
+                "plot group": "visibility_dieoff",
+                "title": "Visibility Dieoff CSI",
+                "number of rows": 2,
+                "row1": ["csi_threshold1", "csi_threshold3"],
+                "row2": ["csi_threshold5", "csi_threshold10"],
+            },
+            {
+                "plot group": "visibility_dieoff",
+                "title": "Visibility Dieoff BIAS",
+                "number of rows": 2,
+                "row1": ["bias_threshold1", "bias_threshold3"],
+                "row2": ["bias_threshold5", "bias_threshold10"],
+            },
+        ]
+        plan = build_plan(raw)
+        self.assertEqual(len(plan.slides), 4)
+        self.assertEqual(
+            plan.slides[0].captions,
+            (("threshold500", "threshold1000"), ("threshold3000", "threshold6000")),
+        )
+        self.assertEqual(
+            plan.slides[1].captions,
+            (("threshold500", "threshold1000"), ("threshold3000", "threshold6000")),
+        )
+        self.assertEqual(
+            plan.slides[2].captions,
+            (("threshold1", "threshold3"), ("threshold5", "threshold10")),
+        )
+        self.assertEqual(
+            plan.slides[3].captions,
+            (("threshold1", "threshold3"), ("threshold5", "threshold10")),
+        )
+
     def test_slides_resolve_rows_exactly_before_unique_partial_matches(self):
         raw = example()
         raw["plots"][0].update({"name": "ua_dieoff", "plot_type": "dieoff",
@@ -119,6 +192,102 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(job.relative_path, "ua_dieoff/ua_dieoff_T_rmse_f000.png")
         self.assertEqual(job.lead_tag, "f000")
 
+    def test_difference_curves_filename_and_slide_matching(self):
+        raw = example()
+        raw["plots"] = [{
+            "name": "sfc_tseries",
+            "application": "surface",
+            "plot_type": "time series",
+            "variable": ["t2m", "wind10m"],
+            "statistic": ["rmse"],
+            "forecast lead time": [0],
+            "Difference curves": "Diff all curves against the 1st added curve",
+        }]
+        raw["slides"] = [{
+            "plot group": "sfc_tseries",
+            "number of rows": 1,
+            "row1": ["t2m_rmse_f000", "wind10m_rmse+diff_f000"],
+        }]
+        plan = build_plan(raw)
+        self.assertEqual(len(plan.jobs), 2)
+        paths = [job.relative_path for job in plan.jobs]
+        self.assertEqual(paths, [
+            "sfc_tseries/sfc_tseries_t2m_rmse+diff_f000.png",
+            "sfc_tseries/sfc_tseries_wind10m_rmse+diff_f000.png",
+        ])
+        self.assertEqual(plan.slides[0].rows, (
+            ("sfc_tseries/sfc_tseries_t2m_rmse+diff_f000.png",
+             "sfc_tseries/sfc_tseries_wind10m_rmse+diff_f000.png"),
+        ))
+        # Test disabled difference curves
+        raw["plots"][0]["Difference curves"] = "none"
+        plan_none = build_plan(raw)
+        self.assertEqual([job.relative_path for job in plan_none.jobs], [
+            "sfc_tseries/sfc_tseries_t2m_rmse_f000.png",
+            "sfc_tseries/sfc_tseries_wind10m_rmse_f000.png",
+        ])
+
+    def test_exclude_and_include_experiment_per_plot(self):
+        raw = example()
+        raw["experiments"] = [
+            {"name": "EXP_A", "color": "red", "overlay": True},
+            {"name": "EXP_B", "color": "blue", "overlay": True},
+            {"name": "EXP_C", "color": "orange", "overlay": True},
+        ]
+        raw["plots"] = [
+            {
+                "name": "all_exps",
+                "application": "surface",
+                "plot_type": "dieoff",
+                "variable": ["t2m"],
+                "statistic": ["rmse"],
+            },
+            {
+                "name": "exclude_c",
+                "exclude experiment": ["EXP_C"],
+                "application": "Radar (MRMS)",
+                "plot_type": "die off",
+                "variable": ["Composite Reflectivity"],
+                "Threshold": [25],
+                "statistic": ["CSI"],
+            },
+            {
+                "name": "include_b",
+                "include experiment": "EXP_B",
+                "application": "surface",
+                "plot_type": "dieoff",
+                "variable": ["t2m"],
+                "statistic": ["rmse"],
+            },
+        ]
+        plan = build_plan(raw)
+        jobs = {job.name: job for job in plan.jobs}
+        self.assertEqual([e.name for e in jobs["all_exps"].experiments], ["EXP_A", "EXP_B", "EXP_C"])
+        self.assertEqual([e.name for e in jobs["exclude_c"].experiments], ["EXP_A", "EXP_B"])
+        self.assertEqual([e.name for e in jobs["include_b"].experiments], ["EXP_B"])
+        # Ensure exclude experiment is not part of filename parameter tags
+        self.assertEqual(jobs["exclude_c"].relative_path,
+                         "exclude_c/exclude_c_composite_reflectivity_csi_threshold25.png")
+
+        # Unknown experiment in exclude experiment is safely ignored (no-op)
+        ign = deepcopy(raw)
+        ign["plots"][1]["exclude experiment"] = ["NONEXISTENT"]
+        plan_ign = build_plan(ign)
+        jobs_ign = {job.name: job for job in plan_ign.jobs}
+        self.assertEqual([e.name for e in jobs_ign["exclude_c"].experiments], ["EXP_A", "EXP_B", "EXP_C"])
+
+        # Exclude all experiments
+        bad = deepcopy(raw)
+        bad["plots"][1]["exclude experiment"] = ["EXP_A", "EXP_B", "EXP_C"]
+        with self.assertRaisesRegex(ConfigError, "all experiments were excluded"):
+            build_plan(bad)
+
+        # Mutually exclusive spelling
+        bad = deepcopy(raw)
+        bad["plots"][1]["exclude_experiments"] = ["EXP_C"]
+        with self.assertRaisesRegex(ConfigError, "Use only one exclude experiment spelling"):
+            build_plan(bad)
+
     def test_readable_parameter_tags_are_safe_stable_and_keep_numeric_signs(self):
         raw = example()
         raw["plots"][0].update({"variable": ["T"], "statistic": ["rmse"],
@@ -151,18 +320,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(len(plan.jobs), 84)
         self.assertEqual({job.name for job in plan.jobs}, {"ua_profile", "second_profile"})
 
-    def test_minimum_waiting_seconds_and_one_second_default(self):
+    def test_inter_plot_waiting_seconds_and_one_second_default(self):
         raw = example()
-        raw["automation"] = {"minimum waiting seconds": 10}
+        raw["automation"] = {"inter-plot waiting seconds": 10}
         preferred = build_plan(raw).settings
-        self.assertEqual(preferred.minimum_waiting_seconds, 10)
+        self.assertEqual(preferred.inter_plot_waiting_seconds, 10)
         raw["automation"] = {}
-        self.assertEqual(build_plan(raw).settings.minimum_waiting_seconds, 1)
-        raw["automation"] = {"minimum waiting seconds": 5}
-        self.assertEqual(build_plan(raw).settings.minimum_waiting_seconds, 5)
+        self.assertEqual(build_plan(raw).settings.inter_plot_waiting_seconds, 1)
+        raw["automation"] = {"inter-plot waiting seconds": 5}
+        self.assertEqual(build_plan(raw).settings.inter_plot_waiting_seconds, 5)
         for value in (1, 1.5, 4, 86400):
-            raw["automation"] = {"minimum waiting seconds": value}
-            self.assertEqual(build_plan(raw).settings.minimum_waiting_seconds, value)
+            raw["automation"] = {"inter-plot waiting seconds": value}
+            self.assertEqual(build_plan(raw).settings.inter_plot_waiting_seconds, value)
 
     def test_control_waiting_seconds_default_and_overrides_are_independent(self):
         raw = example()
@@ -172,7 +341,7 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=value):
                 settings = build_plan(raw).settings
                 self.assertEqual(settings.control_waiting_seconds, value)
-                self.assertEqual(settings.minimum_waiting_seconds, 1)
+                self.assertEqual(settings.inter_plot_waiting_seconds, 1)
                 self.assertEqual(settings.cooldown_seconds, 180)
 
     def test_control_waiting_seconds_rejects_invalid_values(self):
@@ -182,13 +351,13 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(ConfigError, "control waiting seconds"):
                 build_plan(raw)
 
-    def test_minimum_waiting_seconds_rejects_invalid_values_and_old_keys(self):
+    def test_inter_plot_waiting_seconds_rejects_invalid_values_and_old_keys(self):
         for value in (0, 0.9, -1, 86401, True, "10", float("nan"), float("inf")):
             raw = example()
-            raw["automation"] = {"minimum waiting seconds": value}
+            raw["automation"] = {"inter-plot waiting seconds": value}
             with self.subTest(value=value), self.assertRaises(ConfigError):
                 build_plan(raw)
-        for key in ("min_waiting_time", "min_interval_seconds"):
+        for key in ("minimum waiting seconds", "min_waiting_time", "min_interval_seconds"):
             raw["automation"] = {key: 10}
             with self.subTest(key=key), self.assertRaisesRegex(ConfigError, "Unknown automation options"):
                 build_plan(raw)
@@ -485,9 +654,9 @@ class ConfigTests(unittest.TestCase):
                 build_plan(raw)
 
     def test_cannot_disable_pacing_or_set_unbounded_retries(self):
-        for settings in ({"minimum waiting seconds": 0}, {"minimum waiting seconds": 0.9},
+        for settings in ({"inter-plot waiting seconds": 0}, {"inter-plot waiting seconds": 0.9},
                  {"cooldown_seconds": 10},
-                         {"max_attempts": 10}, {"minimum waiting seconds": float("nan")}):
+                         {"max_attempts": 10}, {"inter-plot waiting seconds": float("nan")}):
             raw = example()
             raw["automation"] = settings
             with self.assertRaises(ConfigError):
@@ -495,12 +664,12 @@ class ConfigTests(unittest.TestCase):
 
     def test_explicit_wait_preserves_one_second_default(self):
         raw = example()
-        raw["automation"] = {"minimum waiting seconds": 10}
+        raw["automation"] = {"inter-plot waiting seconds": 10}
         settings = build_plan(raw).settings
-        self.assertEqual(settings.minimum_waiting_seconds, 10)
+        self.assertEqual(settings.inter_plot_waiting_seconds, 10)
         self.assertEqual(settings.cooldown_seconds, 180)
         raw.pop("automation")
-        self.assertEqual(build_plan(raw).settings.minimum_waiting_seconds, 1)
+        self.assertEqual(build_plan(raw).settings.inter_plot_waiting_seconds, 1)
 
 
 if __name__ == "__main__":

@@ -90,10 +90,10 @@ def figure_header(job: PlotJob, effective: dict | None = None) -> list[str]:
     ]
 
 
-ANNOTATE_IMAGE = """async ({image, header, experiments, sourceTop, removeOldLegend, clearDisclaimer,
+ANNOTATE_IMAGE = """async ({image, header, experiments, diffExperiments=[], sourceTop, removeOldLegend, clearDisclaimer,
     lineWeight=2, markerWeight=7}) => {
-    for (const experiment of experiments)
-        if (!CSS.supports('color', experiment.color)) throw Error('Invalid plot color: ' + experiment.color);
+    for (const item of [...experiments, ...(diffExperiments || [])])
+        if (!CSS.supports('color', item.color)) throw Error('Invalid plot color: ' + item.color);
     const source = new Image();
     source.src = image;
     await source.decode();
@@ -140,21 +140,41 @@ ANNOTATE_IMAGE = """async ({image, header, experiments, sourceTop, removeOldLege
         rows.push(...wrap(text, availableWidth));
     }
     const symbolWidth = 38;
-    const widths = experiments.map(experiment => context.measureText(experiment.name).width + symbolWidth + 18);
-    const stacked = widths.reduce((total, width) => total + width, 0) > availableWidth;
-    const legend = [];
-    let legendHeight = 0;
-    let horizontalOffset = 0;
-    for (const [index, experiment] of experiments.entries()) {
-        const lines = wrap(experiment.name, availableWidth - symbolWidth);
-        legend.push({experiment, lines, x:stacked ? padding : padding + horizontalOffset,
-                     y:stacked ? legendHeight : 0});
-        if (stacked) legendHeight += lines.length * 24;
-        else { legendHeight = 24; horizontalOffset += widths[index]; }
+
+    const layoutGroup = (items, startY) => {
+        const widths = items.map(item => context.measureText(item.name).width + symbolWidth + 18);
+        const stacked = widths.reduce((total, width) => total + width, 0) > availableWidth;
+        const placed = [];
+        let groupHeight = 0;
+        let horizontalOffset = 0;
+        for (const [index, item] of items.entries()) {
+            const lines = wrap(item.name, availableWidth - symbolWidth);
+            placed.push({
+                item, lines,
+                x: stacked ? padding : padding + horizontalOffset,
+                y: startY + (stacked ? groupHeight : 0)
+            });
+            if (stacked) groupHeight += lines.length * 24;
+            else { groupHeight = 24; horizontalOffset += widths[index]; }
+        }
+        return {placed, height: groupHeight || 24, rows: stacked ? groupHeight / 24 : 1};
+    };
+
+    const primaryLayout = layoutGroup(experiments, 0);
+    let totalLegendHeight = primaryLayout.height;
+    let totalRows = primaryLayout.rows;
+    let allPlaced = [...primaryLayout.placed];
+
+    if (diffExperiments && diffExperiments.length > 0) {
+        const diffLayout = layoutGroup(diffExperiments, primaryLayout.height + 4);
+        totalLegendHeight = primaryLayout.height + 4 + diffLayout.height;
+        totalRows += diffLayout.rows;
+        allPlaced.push(...diffLayout.placed);
     }
+
     const metadataHeight = 4 + rows.length * 22;
     const legendTop = metadataHeight + 4;
-    const headerHeight = legendTop + legendHeight + 6;
+    const headerHeight = legendTop + totalLegendHeight + 6;
     canvas.height = chartHeight + headerHeight;
     context.fillStyle = 'white';
     context.fillRect(0, 0, canvas.width, canvas.height);
@@ -166,10 +186,10 @@ ANNOTATE_IMAGE = """async ({image, header, experiments, sourceTop, removeOldLege
         context.fillText(row, padding, position);
         position += 22;
     }
-    for (const entry of legend) {
+    for (const entry of allPlaced) {
         const position = legendTop + entry.y;
-        context.strokeStyle = entry.experiment.color;
-        context.fillStyle = entry.experiment.color;
+        context.strokeStyle = entry.item.color;
+        context.fillStyle = entry.item.color;
         context.lineWidth = lineWeight;
         context.beginPath(); context.moveTo(entry.x, position + 12);
         context.lineTo(entry.x + 30, position + 12); context.stroke();
@@ -184,19 +204,72 @@ ANNOTATE_IMAGE = """async ({image, header, experiments, sourceTop, removeOldLege
         context.fillStyle = 'white';
         context.fillRect(0, headerHeight, canvas.width, 18);
     }
+    const allNames = [...experiments.map(e => e.name), ...(diffExperiments || []).map(e => e.name)];
     return {image:canvas.toDataURL('image/png'), width:canvas.width,
             height:canvas.height, header_height:headerHeight,
-            legend_rows:stacked ? legendHeight / 24 : 1, legend_in_header:true,
-            legend_names:experiments.map(experiment => experiment.name)};
+            legend_rows:totalRows, legend_in_header:true,
+            legend_names:allNames};
 }"""
+
+
+def resolve_diff_entries(job: PlotJob, plot_params: dict | None = None,
+                         diff_curves: list[dict] | None = None) -> list[dict]:
+    if diff_curves is not None:
+        return diff_curves
+
+    if plot_params and "curves" in plot_params:
+        entries = []
+        curves_list = plot_params["curves"]
+        for c in curves_list:
+            diff_from = c.get("diffFrom")
+            if diff_from and len(diff_from) == 2:
+                idx_a, idx_b = diff_from[0], diff_from[1]
+                if idx_a < len(curves_list) and idx_b < len(curves_list):
+                    raw_a = curves_list[idx_a].get("data-source") or curves_list[idx_a].get("label") or f"Curve {idx_a + 1}"
+                    raw_b = curves_list[idx_b].get("data-source") or curves_list[idx_b].get("label") or f"Curve {idx_b + 1}"
+                    exp_map = {re.sub(r"[^A-Za-z0-9]", "", exp.name).casefold(): exp.name for exp in job.experiments}
+                    exp_map.update({exp.name.casefold(): exp.name for exp in job.experiments})
+                    name_a = exp_map.get(raw_a.casefold(), raw_a)
+                    name_b = exp_map.get(raw_b.casefold(), raw_b)
+                    entries.append({
+                        "name": f"{name_a} - {name_b}",
+                        "color": c.get("color", "rgb(255,165,0)")
+                    })
+        if entries:
+            return entries
+
+    has_diff = any(
+        re.sub(r"[\s_-]+", "", name.casefold()) in {"differencecurves", "diffcurves", "diff", "plotformat"}
+        and str(val).strip().casefold() not in {"none", "false", "0", "no"}
+        for name, val in job.parameters
+    ) or "+diff" in job.relative_path
+
+    if has_diff and len(job.experiments) >= 2:
+        entries = []
+        if len(job.experiments) == 2:
+            colors = ["rgb(255,165,0)"]
+        else:
+            colors = ["rgb(95,95,95)", "rgb(238,130,238)", "#2ca02c", "#8c564b", "rgb(255,165,0)"]
+        base_exp = job.experiments[0].name
+        for i, exp in enumerate(job.experiments[1:]):
+            entries.append({
+                "name": f"{exp.name} - {base_exp}",
+                "color": colors[i % len(colors)]
+            })
+        return entries
+
+    return []
 
 
 def annotate_image(page, job: PlotJob, image: bytes, previous_figure: dict | None = None,
                    *, effective_settings: dict | None = None,
-                   plotted_curves: list[dict] | None = None) -> tuple[bytes, dict]:
+                   plotted_curves: list[dict] | None = None,
+                   plot_params: dict | None = None,
+                   diff_curves: list[dict] | None = None) -> tuple[bytes, dict]:
     if not is_png(image):
         raise RunError("Metadata rendering requires a PNG image")
     effective_settings = effective_settings or (previous_figure or {}).get("effective_settings")
+    plot_params = plot_params or (previous_figure or {}).get("plot_params")
     header = figure_header(job, effective_settings)
     source_top = (previous_figure or {}).get("header_height", 0)
     if type(source_top) is not int or source_top < 0:
@@ -216,10 +289,12 @@ def annotate_image(page, job: PlotJob, image: bytes, previous_figure: dict | Non
             ]
         if filtered:
             legend_experiments = filtered
+    diff_entries = resolve_diff_entries(job, plot_params, diff_curves)
     rendered = page.evaluate(ANNOTATE_IMAGE, {
         "image": "data:image/png;base64," + base64.b64encode(image).decode("ascii"),
         "header": header,
         "experiments": legend_experiments,
+        "diffExperiments": diff_entries,
         "sourceTop": source_top,
         "removeOldLegend": bool(previous_figure) and not previous_figure.get("legend_in_header", False),
         "clearDisclaimer": bool((previous_figure or {}).get("disclaimer")),
@@ -235,8 +310,12 @@ def annotate_image(page, job: PlotJob, image: bytes, previous_figure: dict | Non
     metadata["legend_styles"] = ["solid"]
     metadata["line_weight"] = job.line_weight
     metadata["marker_weight"] = job.marker_weight
+    if diff_entries:
+        metadata["diff_legend_names"] = [d["name"] for d in diff_entries]
     if effective_settings:
         metadata["effective_settings"] = effective_settings
+    if plot_params:
+        metadata["plot_params"] = plot_params
     image = base64.b64decode(rendered["image"][len(prefix):], validate=True)
     if not is_png(image):
         raise RunError("Metadata rendering returned an invalid PNG")
@@ -285,7 +364,15 @@ PARAMETERS = """() => {
             Array.from(element.selectedOptions).map(option => option.value) : element.value;
         else if (parameter?.type === 'dateRange') current = matsParamUtils.getValueForParamName(name);
         else if (element && 'value' in element) current = element.value;
-        return {name, label:parameter?.label || parameter?.text || name, type:parameter?.type,
+        let label = parameter?.label || parameter?.text;
+        if (!label) {
+            try {
+                const itemBtn = document.querySelector('#' + name + '-item .control-button, #' + name + '-item button, #' + name + '-item label');
+                if (itemBtn) label = itemBtn.textContent.trim();
+            } catch (_) {}
+        }
+        if (!label && name === 'plotFormat') label = 'Difference Curves';
+        return {name, label:label || name, type:parameter?.type,
             value:current, options, disabled:!!element?.disabled,
             scope:name in values.curveParams ? 'curve' : 'plot'};
     });
@@ -479,7 +566,16 @@ class UpperAirBrowser:
 
     def _resolve_parameter(self, name: str) -> dict:
         parameters = self._parameters()
-        aliases = {"forecast lead time": "forecast-length"}
+        aliases = {
+            "forecast lead time": "forecast-length",
+            "difference curves": "plotFormat",
+            "difference_curves": "plotFormat",
+            "difference-curves": "plotFormat",
+            "diff curves": "plotFormat",
+            "diff_curves": "plotFormat",
+            "diff": "plotFormat",
+            "difference": "plotFormat",
+        }
         if self.application == "upperair":
             aliases["truth"] = "database"
         try:
@@ -506,6 +602,25 @@ class UpperAirBrowser:
                 aliases = {key: label for key, (label, tag) in VARIABLES.items()}
             elif name == "statistic" and self.application in {"surface", "upperair"}:
                 aliases = STATISTICS
+            elif name == "threshold" and str(self.expected.get("variable", "")).lower() in {"visibility", "vis"}:
+                aliases = {
+                    "1": "1 (visibility",
+                    "1/2": "1/2 (visibility",
+                    "10": "10 (visibility",
+                }
+            elif name == "plotFormat":
+                aliases = {
+                    "none": "none",
+                    "false": "none",
+                    "diff": "Diff all curves against the 1st added curve",
+                    "diff all": "Diff all curves against the 1st added curve",
+                    "diff all curves": "Diff all curves against the 1st added curve",
+                    "diff all curves against the 1st added curve": "Diff all curves against the 1st added curve",
+                    "true": "Diff all curves against the 1st added curve",
+                    "pairwise": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
+                    "diff pairwise": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
+                    "diff the 1st and 2nd curves, 3rd and 4th, etc": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
+                }
             candidates = [option["value"] for option in options]
             try:
                 selected = resolve_option(requested, candidates, name, aliases)
@@ -521,6 +636,9 @@ class UpperAirBrowser:
         self._settle_controls()
         actual = next(parameter["value"] for parameter in self._parameters() if parameter["name"] == name)
         if actual != requested and actual != [requested]:
+            if name in {"dates", "curve-dates"} and isinstance(actual, str) and " - " in actual:
+                self.expected[name] = actual
+                return actual
             model = self.expected.get("data-source")
             context = f" for experiment {model!r}" if model else ""
             raise RunError(f"MATS did not accept {name}={requested!r}{context}: {actual!r}")
@@ -658,12 +776,22 @@ class UpperAirBrowser:
                 assigned = set(self.expected)
                 for name, value in job.parameters:
                     parameter = self._resolve_parameter(name)
+                    if parameter["scope"] == "plot":
+                        continue
                     if parameter["name"] in assigned or parameter["name"] in {
                             "data-source", "label", "curve-dates", "plot-dates", "color"}:
                         raise RunError(f"Duplicate or reserved MATS parameter: {name}")
                     assigned.add(parameter["name"])
                     self._set(name, value)
-                self._set(date_parameter, date_job.mats_dates, choice=False)
+                actual_dates = self._set(date_parameter, date_job.mats_dates, choice=False)
+                if actual_dates != date_job.mats_dates and isinstance(actual_dates, str) and " - " in actual_dates:
+                    try:
+                        s_part, e_part = actual_dates.split(" - ")
+                        c_start = datetime.strptime(s_part, "%m/%d/%Y %H:%M").replace(tzinfo=timezone.utc).isoformat()
+                        c_end = datetime.strptime(e_part, "%m/%d/%Y %H:%M").replace(tzinfo=timezone.utc).isoformat()
+                        date_job = replace(date_job, start=c_start, end=c_end)
+                    except Exception:
+                        pass
                 self._set("label", curve.label, choice=False)
                 if not self.page.evaluate("color => CSS.supports('color', color)", curve.color):
                     raise RunError(f"Invalid plot color: {curve.color!r}")
@@ -702,6 +830,10 @@ class UpperAirBrowser:
         validate_effective_curves(self.curves, requested_curves)
         effective_curves = [{name: curve.get(name, value) for name, value in defaults.items()}
                     for curve, defaults in zip(self.curves, default_curves)]
+        for name, value in job.parameters:
+            parameter = self._resolve_parameter(name)
+            if parameter["scope"] == "plot":
+                self._set(name, value)
         plot_parameters = self._snapshot()["plotParams"]
         self.effective_settings = {"application": self.application, "application_title": selected["title"],
                    "application_url": self.url, "plot_type": plot_type,
@@ -740,7 +872,8 @@ class UpperAirBrowser:
         image, metadata["figure"] = annotate_image(
             self.page, job, image,
             effective_settings=self.effective_settings,
-            plotted_curves=metadata["curves"]
+            plotted_curves=metadata["curves"],
+            plot_params=metadata.get("plot_params"),
         )
         self.plotted = True
         return image, metadata

@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 from automats.config import Settings, STATISTICS, build_plan
 from automats.browser import EXPORT_IMAGE, Throttled, UpperAirBrowser, annotate_image, discover_applications, figure_header, minimize_window, resolve_application, retry_after_seconds
 from automats.cli import ProgressDisplay, main
-from automats.runner import CHROMIUM_ARGS, CHROMIUM_IGNORE_DEFAULT_ARGS, DEFAULT_USER_AGENT, PNG_SIGNATURE, QueryPacer, ResolutionError, ResultStore, RunError, is_png, lock_error, resolve_option, run_plan, validate_curves, validate_effective_curves
+from automats.runner import CHROMIUM_ARGS, CHROMIUM_IGNORE_DEFAULT_ARGS, DEFAULT_USER_AGENT, PNG_SIGNATURE, QueryPacer, ResolutionError, ResultStore, RunError, figure_exists, is_png, lock_error, resolve_option, run_plan, validate_curves, validate_effective_curves
 from automats.slides import SlideError, build_slides
 from test_config import example
 
@@ -277,7 +277,7 @@ class PacingTests(unittest.TestCase):
         self.assertEqual(self.clock.waits, [1])
 
     def test_ten_second_gap_follows_short_and_long_plots_and_keeps_cooldown(self):
-        pacer = QueryPacer(Settings(minimum_waiting_seconds=10), self.clock.clock, self.clock.wait)
+        pacer = QueryPacer(Settings(inter_plot_waiting_seconds=10), self.clock.clock, self.clock.wait)
         pacer.before_query()
         self.clock.now += 4
         pacer.after_plot()
@@ -357,6 +357,65 @@ class ResultTests(unittest.TestCase):
                 self.assertEqual(run_plan(plan, root / "figures", log=lambda message: None), 0)
                 browser.assert_not_called()
 
+    def test_default_skip_existing_all_figures_does_not_start_browser(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "figures"
+            for job in self.plan.jobs:
+                target = output / job.relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(png_image())
+            with patch("automats.runner.Path.home", return_value=root), \
+                    patch("playwright.sync_api.sync_playwright") as browser:
+                saved = run_plan(self.plan, output, log=lambda message: None)
+                self.assertEqual(saved, 0)
+                browser.assert_not_called()
+
+    def test_default_skip_existing_partial_figures_only_plots_missing(self):
+        plan = replace(self.plan, jobs=self.plan.jobs[:2])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "figures"
+            first_target = output / plan.jobs[0].relative_path
+            first_target.parent.mkdir(parents=True, exist_ok=True)
+            first_target.write_bytes(png_image())
+            plotted_jobs = []
+
+            def plot(job):
+                plotted_jobs.append(job)
+                return png_image(), {}
+
+            with patch("automats.runner.Path.home", return_value=root), \
+                    patch("playwright.sync_api.sync_playwright"), \
+                    patch("automats.browser.UpperAirBrowser") as client:
+                client.return_value.plot.side_effect = plot
+                saved = run_plan(plan, output, log=lambda message: None)
+                self.assertEqual(saved, 1)
+                self.assertEqual(plotted_jobs, [plan.jobs[1]])
+
+    def test_update_regenerates_existing_figures(self):
+        plan = replace(self.plan, jobs=self.plan.jobs[:2])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "figures"
+            for job in plan.jobs:
+                target = output / job.relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(png_image())
+            plotted_jobs = []
+
+            def plot(job):
+                plotted_jobs.append(job)
+                return png_image(), {}
+
+            with patch("automats.runner.Path.home", return_value=root), \
+                    patch("playwright.sync_api.sync_playwright"), \
+                    patch("automats.browser.UpperAirBrowser") as client:
+                client.return_value.plot.side_effect = plot
+                saved = run_plan(plan, output, update=True, log=lambda message: None)
+                self.assertEqual(saved, 2)
+                self.assertEqual(plotted_jobs, list(plan.jobs))
+
     def test_store_accepts_only_png_and_rejects_jpeg(self):
         with tempfile.TemporaryDirectory() as directory:
             store = ResultStore(Path(directory), self.plan.settings.base_url)
@@ -375,7 +434,7 @@ class ResultTests(unittest.TestCase):
 
     def test_runner_waits_ten_seconds_after_a_long_plot_not_after_final_plot(self):
         plan = replace(self.plan, jobs=self.plan.jobs[:2],
-                       settings=replace(self.plan.settings, minimum_waiting_seconds=10))
+                       settings=replace(self.plan.settings, inter_plot_waiting_seconds=10))
         clock = FakeClock()
         pacer = QueryPacer(plan.settings, clock.clock, clock.wait)
         starts = []
@@ -483,6 +542,23 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(resolve_option("t2m", ["Temperature at 2m (C)"], "variable",
                                         {"t2m": "Temperature at 2m"}), "Temperature at 2m (C)")
         self.assertEqual(resolve_option("Wind", ["Wind", "Wind Speed"], "variable"), "Wind")
+
+        # Threshold matching with aliases: "1" matches "1 (visibility < 1 mi)" instead of "1/2" or "10"
+        vis_options = [
+            "1/2 (visibility < 1/2 mi)",
+            "1 (visibility < 1 mi)",
+            "10 (visibility < 10 mi)",
+            "2 (visibility < 2 mi)",
+            "3 (visibility < 3 mi)",
+            "5 (visibility < 5 mi)",
+        ]
+        vis_aliases = {"1": "1 (visibility", "1/2": "1/2 (visibility", "10": "10 (visibility"}
+        self.assertEqual(resolve_option("1", vis_options, "threshold", vis_aliases), "1 (visibility < 1 mi)")
+        self.assertEqual(resolve_option("1/2", vis_options, "threshold", vis_aliases), "1/2 (visibility < 1/2 mi)")
+        self.assertEqual(resolve_option("10", vis_options, "threshold", vis_aliases), "10 (visibility < 10 mi)")
+        self.assertEqual(resolve_option("3", vis_options, "threshold", vis_aliases), "3 (visibility < 3 mi)")
+        self.assertEqual(resolve_option("5", vis_options, "threshold", vis_aliases), "5 (visibility < 5 mi)")
+
         for value, options in (("speed", ["U Speed", "V Speed"]), ("xxxxx", ["Dieoff"])):
             with self.assertRaises(RunError):
                 resolve_option(value, options, "variable")
@@ -529,7 +605,7 @@ class ResultTests(unittest.TestCase):
             self.assertTrue(store.completed(self.job, effective=effective))
             self.assertFalse(store.completed(self.job, effective={"statistic": "Bias"}))
 
-    def test_each_normal_run_regenerates_even_a_matching_existing_figure(self):
+    def test_update_regenerates_even_a_matching_existing_figure(self):
         plan = replace(self.plan, jobs=(self.job,))
         clock = FakeClock()
         pacer = QueryPacer(plan.settings, clock.clock, clock.wait)
@@ -546,7 +622,7 @@ class ResultTests(unittest.TestCase):
                 client.return_value.effective_settings = {}
                 client.return_value.plot.side_effect = [(image, {"effective_settings": {}}) for image in images]
                 for image in images:
-                    self.assertEqual(run_plan(plan, output, log=lambda message: None), 1)
+                    self.assertEqual(run_plan(plan, output, update=True, log=lambda message: None), 1)
                     self.assertEqual((output / self.job.relative_path).read_bytes(), image)
                 self.assertEqual(client.return_value.plot.call_count, 2)
 
@@ -562,7 +638,7 @@ class ResultTests(unittest.TestCase):
                 client.return_value.effective_settings = {}
                 client.return_value.plot.side_effect = RunError("MATS query failed")
                 with self.assertRaisesRegex(RunError, "MATS query failed"):
-                    run_plan(plan, output, log=lambda message: None)
+                    run_plan(plan, output, update=True, log=lambda message: None)
             self.assertEqual((output / self.job.relative_path).read_bytes(), old_image)
 
     def test_curve_validation_rejects_wrong_dates_leads_and_models(self):
@@ -911,6 +987,20 @@ class MetadataTests(unittest.TestCase):
                 }""", {"image": "data:image/png;base64," + base64.b64encode(upgraded).decode(),
                        "top": upgraded_metadata["header_height"]})
                 self.assertTrue(all(channel < 100 for channel in border_pixels[:3]))
+
+                # Difference curves legend
+                diff_job = replace(job, parameters=(("Difference curves", "Diff all curves against the 1st added curve"),))
+                plot_params = {
+                    "curves": [
+                        {"data-source": "RRFSv2x", "label": "RRFSv2x", "color": "rgb(255,0,0)", "diffFrom": None},
+                        {"data-source": "RRFSv2b", "label": "RRFSv2b", "color": "rgb(0,0,255)", "diffFrom": None},
+                        {"data-source": "RRFSv2b", "label": "RRFSv2b-RRFSv2x", "color": "rgb(255,165,0)", "diffFrom": [1, 0]},
+                    ]
+                }
+                diff_annotated, diff_meta = annotate_image(page, diff_job, bytes(image), plot_params=plot_params)
+                self.assertEqual(diff_meta["legend_rows"], 2)
+                self.assertEqual(diff_meta["legend_names"], ["RRFSv2x", "RRFSv2b", "RRFSv2b - RRFSv2x"])
+                self.assertEqual(diff_meta["diff_legend_names"], ["RRFSv2b - RRFSv2x"])
             finally:
                 browser.close()
 
@@ -962,6 +1052,59 @@ class ControlPacingTests(unittest.TestCase):
         self.assertEqual(self.client._set("label", "next"), "next")
         self.assertAlmostEqual(self.clock.now, 0.2)
         self.assertEqual(self.client.expected, {"label": "next"})
+
+    def test_difference_curves_parameter_resolution_and_setting(self):
+        from automats.browser import CONTROLS_READY
+
+        self.client.application = "surface"
+        self.client.expected = {}
+        plot_format_param = {
+            "name": "plotFormat", "label": "Difference Curves", "disabled": False,
+            "type": "select", "scope": "plot", "value": "none",
+            "options": [
+                {"value": "none", "label": "none"},
+                {"value": "Diff all curves against the 1st added curve", "label": "Diff all curves against the 1st added curve"},
+                {"value": "Diff the 1st and 2nd curves, 3rd and 4th, etc", "label": "Diff the 1st and 2nd curves, 3rd and 4th, etc"},
+            ],
+        }
+        self.client._parameters = Mock(return_value=[plot_format_param])
+        self.client.page.evaluate.side_effect = lambda script, *args: True if script == CONTROLS_READY else None
+        resolved = self.client._resolve_parameter("Difference curves")
+        self.assertEqual(resolved["name"], "plotFormat")
+        self.assertEqual(self.client._resolve_parameter("diff")["name"], "plotFormat")
+        self.assertEqual(self.client._resolve_parameter("difference_curves")["name"], "plotFormat")
+
+        # Set difference curves using alias
+        self.client._parameters = Mock(return_value=[{
+            **plot_format_param, "value": "Diff all curves against the 1st added curve"
+        }])
+        actual = self.client._set("Difference curves", "Diff all curves against the 1st added curve")
+        self.assertEqual(actual, "Diff all curves against the 1st added curve")
+        self.assertEqual(self.client.expected["plotFormat"], "Diff all curves against the 1st added curve")
+
+    def test_visibility_threshold_setting(self):
+        from automats.browser import CONTROLS_READY
+
+        self.client.application = "ceil-vis"
+        self.client.expected = {"variable": "visibility"}
+        thresh_param = {
+            "name": "threshold", "label": "Threshold", "disabled": False,
+            "type": "select", "scope": "curve", "value": "none",
+            "options": [
+                {"value": "1/2 (visibility < 1/2 mi)", "label": "1/2 (visibility < 1/2 mi)"},
+                {"value": "1 (visibility < 1 mi)", "label": "1 (visibility < 1 mi)"},
+                {"value": "10 (visibility < 10 mi)", "label": "10 (visibility < 10 mi)"},
+                {"value": "3 (visibility < 3 mi)", "label": "3 (visibility < 3 mi)"},
+            ],
+        }
+        self.client._parameters = Mock(return_value=[{
+            **thresh_param, "value": "1 (visibility < 1 mi)"
+        }])
+        self.client.page.evaluate.side_effect = lambda script, *args: True if script == CONTROLS_READY else None
+        self.client._resolve_parameter = Mock(return_value=thresh_param)
+        actual = self.client._set("threshold", "1")
+        self.assertEqual(actual, "1 (visibility < 1 mi)")
+        self.assertEqual(self.client.expected["threshold"], "1 (visibility < 1 mi)")
 
     def test_dependent_value_changes_restart_the_stable_interval(self):
         self.client._parameters.side_effect = lambda: [
@@ -1511,9 +1654,9 @@ class ChromeWindowTests(unittest.TestCase):
 
         with sync_playwright() as manager:
             try:
-                browser = manager.chromium.launch(channel="chrome", headless=False)
+                browser = manager.chromium.launch(channel="chrome", headless=True)
             except Exception as error:
-                self.skipTest(f"Visible Chrome unavailable: {error}")
+                self.skipTest(f"Chrome unavailable: {error}")
             try:
                 page = browser.new_context().new_page()
                 minimize_window(page)
@@ -1792,12 +1935,13 @@ class SlideTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    recipe = Path(__file__).resolve().parent / "upperair.yaml"
+
     def test_ctrl_c_returns_130_and_stops_progress_display(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         output = StringIO()
         with patch("automats.cli.run_plan", side_effect=KeyboardInterrupt), \
             redirect_stdout(output), redirect_stderr(output):
-            self.assertEqual(main([str(recipe)]), 130)
+            self.assertEqual(main([str(self.recipe)]), 130)
         self.assertIn("Stopped", output.getvalue())
         self.assertIn("Interrupted. Completed figures are retained", output.getvalue())
 
@@ -1813,19 +1957,17 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(" config", output.getvalue())
 
     def test_browser_runs_in_background_by_default_and_can_be_shown(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         for options, shown in (([], False), (["--show-browser"], True)):
             with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
                 with redirect_stdout(StringIO()):
-                    self.assertEqual(main([str(recipe), *options]), 0)
+                    self.assertEqual(main([str(self.recipe), *options]), 0)
                 self.assertEqual(execute.call_args.args[3], not shown)
                 self.assertEqual(execute.call_args.kwargs["show_browser"], shown)
 
     def test_plan_lists_42_paths_without_browser_execution(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         output = StringIO()
         with patch("automats.cli.run_plan") as execute, redirect_stdout(output):
-            self.assertEqual(main([str(recipe), "--plan"]), 0)
+            self.assertEqual(main([str(self.recipe), "--plan"]), 0)
         execute.assert_not_called()
         lines = output.getvalue().splitlines()
         self.assertEqual(len(lines), 43)
@@ -1833,20 +1975,56 @@ class CliTests(unittest.TestCase):
         self.assertTrue(all(line.startswith("figures/") for line in lines[1:]))
 
     def test_output_directory_defaults_to_figures_and_accepts_override(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         for options, directory in (([], "figures"), (["--output-dir", "custom figures"], "custom figures")):
             with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
                 with redirect_stdout(StringIO()):
-                    self.assertEqual(main([str(recipe), *options]), 0)
+                    self.assertEqual(main([str(self.recipe), *options]), 0)
                 self.assertEqual(execute.call_args.args[1], Path(directory))
 
     def test_plan_uses_explicit_output_directory(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         output = StringIO()
         with patch("automats.cli.run_plan") as execute, redirect_stdout(output):
-            self.assertEqual(main([str(recipe), "--output-dir", "custom figures", "--plan"]), 0)
+            self.assertEqual(main([str(self.recipe), "--output-dir", "custom figures", "--plan"]), 0)
         execute.assert_not_called()
         self.assertIn("custom figures/ua_profile/ua_profile_T_rmse_f000.png", output.getvalue().splitlines())
+
+    def test_update_flag_forwarded_to_run_plan(self):
+        with patch("automats.cli.run_plan", return_value=0) as execute:
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main([str(self.recipe)]), 0)
+            self.assertFalse(execute.call_args.kwargs["update"])
+        with patch("automats.cli.run_plan", return_value=0) as execute:
+            with redirect_stdout(StringIO()):
+                self.assertEqual(main([str(self.recipe), "--update"]), 0)
+            self.assertTrue(execute.call_args.kwargs["update"])
+
+    def test_update_rejects_slides_only_and_metadata_only(self):
+        for flag in ("--slides-only", "--metadata-only"):
+            with self.subTest(flag=flag), redirect_stderr(StringIO()), self.assertRaises(SystemExit) as result:
+                main([str(self.recipe), "--update", flag])
+            self.assertEqual(result.exception.code, 2)
+
+    def test_plan_omits_existing_figures_unless_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_dir = Path(directory)
+            fake_fig = output_dir / "ua_profile" / "ua_profile_T_rmse_f000.png"
+            fake_fig.parent.mkdir(parents=True, exist_ok=True)
+            fake_fig.write_bytes(png_image())
+            output = StringIO()
+            with patch("automats.cli.run_plan") as execute, redirect_stdout(output):
+                self.assertEqual(main([str(self.recipe), "--output-dir", str(output_dir), "--plan"]), 0)
+            execute.assert_not_called()
+            lines = output.getvalue().splitlines()
+            self.assertNotIn(str(fake_fig), lines)
+            self.assertEqual(len(lines), 42)
+
+            output_update = StringIO()
+            with patch("automats.cli.run_plan") as execute, redirect_stdout(output_update):
+                self.assertEqual(main([str(self.recipe), "--output-dir", str(output_dir), "--plan", "--update"]), 0)
+            execute.assert_not_called()
+            lines_update = output_update.getvalue().splitlines()
+            self.assertIn(str(fake_fig), lines_update)
+            self.assertEqual(len(lines_update), 43)
 
 
 if __name__ == "__main__":

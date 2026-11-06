@@ -1,0 +1,82 @@
+# Example AutoMATS recipe
+
+experiments:
+- name: RRFSv2_conus_3km_ret_v2x_retv4
+  color: red
+- name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
+  color: blue
+- name: HRRR_OPS
+  color: orange
+
+automation:
+  inter-plot waiting seconds: 3
+  control waiting seconds: 0.5
+
+common:
+  line weight: 3
+  marker weight: 8
+
+plots:
+#- name: sfc_tseries
+#  application: "surface"
+#  truth: "METAR"
+#  plot_type: "time series"
+#  region: "All HRRR domain"
+#  variable: [t2m, td2m, wind10m]
+#  statistic: [rmse]
+#  forecast lead time: [0]
+#  Difference curves: "Diff all curves against the 1st added curve"
+
+#- name: ua_profile
+#  application: "Upper Air"
+#  plot_type: profile
+#  truth: "RAOBs (Traditional)"
+#  region: "HRRR domain"
+#  matched_samples: true
+#  variable: [T, RHobT, Wind]
+#  statistic: [rmse+bias]
+#  forecast lead time: [0, 3]
+
+#- name: radar_dieoff
+#  exclude experiment: [HRRR_OPS]
+#  application: "Radar (MRMS)"
+#  plot_type: "die off"
+#  region: "Continental US"
+#  matched_samples: true
+#  variable: ["Composite Reflectivity"]
+#  Threshold: [25]
+#  statistic: [CSI, BIAS]
+#  Difference curves: "Diff all curves against the 1st added curve"
+
+- name: Ceiling_dieoff
+  application: "Ceiling and Visibility"
+  plot_type: "die off"
+  region: "All HRRR domain"
+  matched_samples: true
+  variable: ["ceiling"]
+  Threshold: [500]
+  statistic: [CSI, BIAS]
+  Difference curves: "Diff all curves against the 1st added curve"
+
+slides:
+- plot group: sfc_tseries
+  title: Surface Time Series RMSE f000h
+  number of rows: 2
+  row1: [t2m_rmse_f000, td2m_rmse_f000]
+  row2: [wind10m_rmse_f000]
+
+#- plot group: ua_profile
+#  title: Upper Air Profile f000, f003
+#  number of rows: 2
+#  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
+#  row2: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]
+#
+#- plot group: ua_profile
+#  title: Upper Air Profile f000
+#  number of rows: 1
+#  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
+#
+#- plot group: ua_profile
+#  title: Upper Air Profile f003
+#  number of rows: 1
+#  row1: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]

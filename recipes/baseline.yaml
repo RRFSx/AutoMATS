@@ -154,15 +154,8 @@ slides:
   row2: [T_rmse+bias_f012, RHobT_rmse+bias_f012, Wind_rmse+bias_f012]
 
 - plot group: ua_tseries
-  title: Upper Air Time Series RMSE+Bias f000h
-  number of rows: 2
-  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000]
-  row2: [Wind_rmse+bias_f000]
-
-- plot group: ua_tseries
   title: Upper Air Time Series RMSE+Bias f001h
-  number of rows: 2
-  row1: [T_rmse+bias_f001, RHobT_rmse+bias_f001]
-  row2: [Wind_rmse+bias_f001]
+  number of rows: 1
+  row1: [T_rmse+bias_f001]
 
 

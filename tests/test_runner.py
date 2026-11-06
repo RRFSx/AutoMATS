@@ -1511,9 +1511,9 @@ class ChromeWindowTests(unittest.TestCase):
 
         with sync_playwright() as manager:
             try:
-                browser = manager.chromium.launch(channel="chrome", headless=False)
+                browser = manager.chromium.launch(channel="chrome", headless=True)
             except Exception as error:
-                self.skipTest(f"Visible Chrome unavailable: {error}")
+                self.skipTest(f"Chrome unavailable: {error}")
             try:
                 page = browser.new_context().new_page()
                 minimize_window(page)
@@ -1792,12 +1792,13 @@ class SlideTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    recipe = Path(__file__).resolve().parent / "upperair.yaml"
+
     def test_ctrl_c_returns_130_and_stops_progress_display(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         output = StringIO()
         with patch("automats.cli.run_plan", side_effect=KeyboardInterrupt), \
             redirect_stdout(output), redirect_stderr(output):
-            self.assertEqual(main([str(recipe)]), 130)
+            self.assertEqual(main([str(self.recipe)]), 130)
         self.assertIn("Stopped", output.getvalue())
         self.assertIn("Interrupted. Completed figures are retained", output.getvalue())
 
@@ -1813,19 +1814,17 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(" config", output.getvalue())
 
     def test_browser_runs_in_background_by_default_and_can_be_shown(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         for options, shown in (([], False), (["--show-browser"], True)):
             with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
                 with redirect_stdout(StringIO()):
-                    self.assertEqual(main([str(recipe), *options]), 0)
+                    self.assertEqual(main([str(self.recipe), *options]), 0)
                 self.assertEqual(execute.call_args.args[3], not shown)
                 self.assertEqual(execute.call_args.kwargs["show_browser"], shown)
 
     def test_plan_lists_42_paths_without_browser_execution(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         output = StringIO()
         with patch("automats.cli.run_plan") as execute, redirect_stdout(output):
-            self.assertEqual(main([str(recipe), "--plan"]), 0)
+            self.assertEqual(main([str(self.recipe), "--plan"]), 0)
         execute.assert_not_called()
         lines = output.getvalue().splitlines()
         self.assertEqual(len(lines), 43)
@@ -1833,18 +1832,16 @@ class CliTests(unittest.TestCase):
         self.assertTrue(all(line.startswith("figures/") for line in lines[1:]))
 
     def test_output_directory_defaults_to_figures_and_accepts_override(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         for options, directory in (([], "figures"), (["--output-dir", "custom figures"], "custom figures")):
             with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
                 with redirect_stdout(StringIO()):
-                    self.assertEqual(main([str(recipe), *options]), 0)
+                    self.assertEqual(main([str(self.recipe), *options]), 0)
                 self.assertEqual(execute.call_args.args[1], Path(directory))
 
     def test_plan_uses_explicit_output_directory(self):
-        recipe = Path(__file__).resolve().parents[1] / "recipes" / "upperair.yaml"
         output = StringIO()
         with patch("automats.cli.run_plan") as execute, redirect_stdout(output):
-            self.assertEqual(main([str(recipe), "--output-dir", "custom figures", "--plan"]), 0)
+            self.assertEqual(main([str(self.recipe), "--output-dir", "custom figures", "--plan"]), 0)
         execute.assert_not_called()
         self.assertIn("custom figures/ua_profile/ua_profile_T_rmse_f000.png", output.getvalue().splitlines())
 

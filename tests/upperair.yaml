@@ -1,0 +1,37 @@
+common:
+  start: "2026-10-01T00:00:00Z"
+  end: "2026-10-15T00:00:00Z"
+
+experiments:
+- name: RRFSv2x
+  color: red
+  overlay: true
+- name: RRFSv2b
+  color: blue
+  overlay: true
+
+automation:
+  base_url: "https://gsl.noaa.gov/int-mats/"
+
+plots:
+- name: ua_profile
+  application: "Upper Air"
+  plot_type: dieoff
+  truth: "RAOBs (Traditional)"
+  region: "HRRR domain"
+  matched_samples: true
+  variable:
+  - Temperature
+  - RHobT
+  - Wind
+  statistic:
+  - rmse
+  - bias
+  forecast lead time:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 6
+  - 9
+  - 12

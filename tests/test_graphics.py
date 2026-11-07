@@ -119,6 +119,36 @@ class GraphicsTests(unittest.TestCase):
         )
         self.assertEqual(remote, expected)
 
+    def test_batch_pull_graphics_files_parallel(self):
+        from unittest.mock import patch
+        from automats.graphics import batch_pull_graphics_files
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            cached_file = tmp / "cached.png"
+            cached_file.write_bytes(b"dummy")
+
+            new_file1 = tmp / "new1.png"
+            new_file2 = tmp / "new2.png"
+
+            tasks = [
+                {"username": "user", "port": 40896, "remote_path": "/r/1", "local_path": cached_file, "cluster": "gaeac6"},
+                {"username": "user", "port": 40896, "remote_path": "/r/2", "local_path": new_file1, "cluster": "gaeac6"},
+                {"username": "user", "port": 40896, "remote_path": "/r/3", "local_path": new_file2, "cluster": "gaeac6"},
+            ]
+
+            def fake_scp(user, port, rpath, lpath):
+                lpath.write_bytes(b"downloaded")
+                return True
+
+            with patch("automats.graphics.scp_pull_file", side_effect=fake_scp) as mock_scp:
+                results = batch_pull_graphics_files(tasks, max_workers=2)
+                # cached_file was already present, so scp should only be called for 2 files
+                self.assertEqual(mock_scp.call_count, 2)
+                self.assertTrue(results[str(cached_file)])
+                self.assertTrue(results[str(new_file1)])
+                self.assertTrue(results[str(new_file2)])
+
 
 if __name__ == "__main__":
     unittest.main()

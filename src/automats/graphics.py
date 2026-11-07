@@ -12,6 +12,7 @@ Handles:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 import os
 from pathlib import Path
@@ -251,6 +252,59 @@ def scp_pull_file(username: str, port: int, remote_path: str, local_path: Path) 
         return False
 
 
+def batch_pull_graphics_files(tasks: List[Dict[str, Any]], max_workers: int = 4) -> Dict[str, bool]:
+    """
+    Downloads uncached graphic files concurrently using a ThreadPoolExecutor.
+    Maintains a safe worker limit (default: 4) to prevent exceeding sshd connection limits.
+    """
+    results: Dict[str, bool] = {}
+    pending: List[Dict[str, Any]] = []
+
+    for t in tasks:
+        loc = t["local_path"]
+        if loc.exists() and loc.stat().st_size > 0:
+            results[str(loc)] = True
+        else:
+            pending.append(t)
+
+    if not pending:
+        return results
+
+    # Deduplicate pending tasks by (port, remote_path, local_path)
+    unique_pending: Dict[Tuple[int, str, str], Dict[str, Any]] = {}
+    for t in pending:
+        key = (t["port"], t["remote_path"], str(t["local_path"]))
+        unique_pending[key] = t
+
+    workers = min(max_workers, len(unique_pending))
+    print(f"[*] Downloading {len(unique_pending)} graphics figure(s) via SCP (parallel workers: {workers})...", flush=True)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {
+            executor.submit(
+                scp_pull_file,
+                t["username"],
+                t["port"],
+                t["remote_path"],
+                t["local_path"],
+            ): t
+            for t in unique_pending.values()
+        }
+        for future in as_completed(future_map):
+            task = future_map[future]
+            loc_str = str(task["local_path"])
+            try:
+                ok = future.result()
+                results[loc_str] = ok
+                if not ok:
+                    print(f"[!] Warning: Remote file not found on {task['cluster']}: {task['remote_path']}", file=sys.stderr)
+            except Exception as e:
+                results[loc_str] = False
+                print(f"[!] Warning: Error retrieving {task['remote_path']}: {e}", file=sys.stderr)
+
+    return results
+
+
 def resolve_graphics_recipe_path(recipe_name: str, base_recipe_path: Optional[Path]) -> Optional[Path]:
     """Finds the graphics recipe YAML file."""
     candidates = []
@@ -352,7 +406,81 @@ def process_graphics_slides(
         print("=" * 70 + "\n", file=sys.stderr)
         return 0
 
-    # 3. Process each graphics slide
+    # 3. Phase 1: Collect and batch-pull all needed graphic figures in parallel
+    transfer_tasks: List[Dict[str, Any]] = []
+    for spec in slides_config:
+        slide_type = str(spec.get("type", "same valid time")).strip().lower().replace("_", " ")
+        prefix = spec.get("prefix", "rrfs")
+        wgf = spec.get("WGF", "det")
+        tile_override = spec.get("tile")
+        cycle = spec.get("cycle")
+        num_rows = spec.get("number of rows", 2)
+
+        for r_num in range(1, num_rows + 1):
+            row_items = spec.get(f"row{r_num}", [])
+            if not isinstance(row_items, list):
+                continue
+            for item in row_items:
+                item_str = str(item).strip()
+                if item_str.lower() == "obs":
+                    continue
+                if "valid" in slide_type:
+                    exp_obj = resolve_experiment(item_str, plan.experiments)
+                    g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
+                    clean_name, tile_extracted, fhr = parse_graphics_name(g_name)
+                    tile = tile_override or tile_extracted
+                    if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
+                        cluster = exp_obj.hpc_cluster
+                        user, port = needed_clusters.get(cluster, ("", 0))
+                        rem_path = build_remote_path(
+                            comroot=exp_obj.remote_comroot,
+                            prefix=prefix,
+                            cycle=cycle,
+                            wgf=wgf,
+                            tile=tile,
+                            fhr=fhr,
+                            graphics_name=clean_name,
+                        )
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        transfer_tasks.append({
+                            "username": user,
+                            "port": port,
+                            "remote_path": rem_path,
+                            "local_path": local_img,
+                            "cluster": cluster,
+                            "clean_name": clean_name,
+                        })
+                else:
+                    exp_ref = spec.get("experiment", "first")
+                    exp_obj = resolve_experiment(exp_ref, plan.experiments)
+                    clean_name, tile_extracted, fhr = parse_graphics_name(item_str)
+                    tile = tile_override or tile_extracted
+                    if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
+                        cluster = exp_obj.hpc_cluster
+                        user, port = needed_clusters.get(cluster, ("", 0))
+                        rem_path = build_remote_path(
+                            comroot=exp_obj.remote_comroot,
+                            prefix=prefix,
+                            cycle=cycle,
+                            wgf=wgf,
+                            tile=tile,
+                            fhr=fhr,
+                            graphics_name=clean_name,
+                        )
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        transfer_tasks.append({
+                            "username": user,
+                            "port": port,
+                            "remote_path": rem_path,
+                            "local_path": local_img,
+                            "cluster": cluster,
+                            "clean_name": clean_name,
+                        })
+
+    if transfer_tasks:
+        batch_pull_graphics_files(transfer_tasks, max_workers=4)
+
+    # 4. Phase 2: Render each graphics slide into PowerPoint deck
     from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
     from pptx.util import Inches, Pt
     from PIL import Image
@@ -428,24 +556,10 @@ def process_graphics_slides(
                     caption_text = exp_obj.name if exp_obj else item_str
                     g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
                     clean_name, tile_extracted, fhr = parse_graphics_name(g_name)
-                    tile = tile_override or tile_extracted
 
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
-                        cluster = exp_obj.hpc_cluster
-                        user, port = needed_clusters.get(cluster, ("", 0))
-                        rem_path = build_remote_path(
-                            comroot=exp_obj.remote_comroot,
-                            prefix=prefix,
-                            cycle=cycle,
-                            wgf=wgf,
-                            tile=tile,
-                            fhr=fhr,
-                            graphics_name=clean_name,
-                        )
                         local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
-                        ok = scp_pull_file(user, port, rem_path, local_img)
-                        if not ok:
-                            print(f"[!] Warning: Remote file not found on {cluster}: {rem_path}", file=sys.stderr)
+                        if not (local_img.exists() and local_img.stat().st_size > 0):
                             local_img = get_missing_placeholder(output_dir, clean_name)
                     else:
                         if not exp_obj:
@@ -458,25 +572,11 @@ def process_graphics_slides(
                     exp_ref = spec.get("experiment", "first")
                     exp_obj = resolve_experiment(exp_ref, plan.experiments)
                     clean_name, tile_extracted, fhr = parse_graphics_name(item_str)
-                    tile = tile_override or tile_extracted
                     caption_text = f"F{fhr:03d}"
 
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
-                        cluster = exp_obj.hpc_cluster
-                        user, port = needed_clusters.get(cluster, ("", 0))
-                        rem_path = build_remote_path(
-                            comroot=exp_obj.remote_comroot,
-                            prefix=prefix,
-                            cycle=cycle,
-                            wgf=wgf,
-                            tile=tile,
-                            fhr=fhr,
-                            graphics_name=clean_name,
-                        )
                         local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
-                        ok = scp_pull_file(user, port, rem_path, local_img)
-                        if not ok:
-                            print(f"[!] Warning: Remote file not found on {cluster}: {rem_path}", file=sys.stderr)
+                        if not (local_img.exists() and local_img.stat().st_size > 0):
                             local_img = get_missing_placeholder(output_dir, clean_name)
                     else:
                         if not exp_obj:

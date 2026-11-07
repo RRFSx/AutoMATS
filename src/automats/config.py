@@ -1,5 +1,7 @@
 """Validate YAML recipes and expand their Cartesian products without accessing MATS."""
 
+from __future__ import annotations
+
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -10,7 +12,10 @@ from pathlib import Path
 import re
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 
 class ConfigError(ValueError):
@@ -57,10 +62,23 @@ class Experiment:
     name: str
     color: str
     overlay: bool = True
+    COMROOT: str | None = None
 
     @property
     def label(self) -> str:
         return re.sub(r"[^A-Za-z0-9]", "", self.name)
+
+    @property
+    def hpc_cluster(self) -> str | None:
+        if self.COMROOT and ":" in self.COMROOT:
+            return self.COMROOT.split(":", 1)[0].strip().lower()
+        return None
+
+    @property
+    def remote_comroot(self) -> str | None:
+        if self.COMROOT and ":" in self.COMROOT:
+            return self.COMROOT.split(":", 1)[1].strip()
+        return self.COMROOT
 
 
 @dataclass(frozen=True)
@@ -177,12 +195,21 @@ class SlideSpec:
 
 
 @dataclass(frozen=True)
+class PygrafGraphicsConfig:
+    enable: bool = False
+    recipe: str | None = None
+
+
+@dataclass(frozen=True)
 class Plan:
     jobs: tuple[PlotJob, ...]
     warnings: tuple[str, ...]
     settings: Settings
     slides: tuple[SlideSpec, ...] = ()
     slide_error: str | None = None
+    pygraf_graphics: PygrafGraphicsConfig | None = None
+    experiments: tuple[Experiment, ...] = ()
+    recipe_path: Path | None = None
 
 
 def _mapping(value: Any, context: str) -> dict:
@@ -280,12 +307,14 @@ def _settings(raw: Any) -> Settings:
 
 
 def load_plan(path: Path) -> Plan:
+    if yaml is None:
+        raise ConfigError("PyYAML is required to read YAML recipes; activate the virtual environment or install PyYAML")
     try:
         with path.open(encoding="utf-8") as stream:
             raw = yaml.safe_load(stream)
     except (OSError, yaml.YAMLError) as error:
         raise ConfigError(f"Cannot read recipe: {error}") from error
-    return build_plan(raw)
+    return build_plan(raw, recipe_path=path)
 
 
 def _format_slide_caption(caption: str, job: PlotJob) -> str:
@@ -393,7 +422,7 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
     return tuple(slides)
 
 
-def build_plan(raw: Any) -> Plan:
+def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
     raw = _mapping(raw, "recipe")
     common = _mapping(raw.get("common"), "common")
     unknown = set(common) - {"start", "end", "line weight", "marker weight"}
@@ -412,14 +441,15 @@ def build_plan(raw: Any) -> Plan:
     experiments = []
     for index, item in enumerate(_choices(raw.get("experiments"), "experiments")):
         item = _mapping(item, f"experiment {index + 1}")
-        if set(item) - {"name", "color", "overlay"}:
-            raise ConfigError(f"Unknown experiment options: {sorted(set(item) - {'name', 'color', 'overlay'})}; use name for the curve label")
+        if set(item) - {"name", "color", "overlay", "COMROOT"}:
+            raise ConfigError(f"Unknown experiment options: {sorted(set(item) - {'name', 'color', 'overlay', 'COMROOT'})}; use name for the curve label")
         name = _text(item.get("name"), "experiment.name")
         if not re.search(r"[A-Za-z0-9]", name):
             raise ConfigError("experiment.name must contain an alphanumeric character for its MATS curve label")
         color = _text(item.get("color", LEAD_COLORS[index % len(LEAD_COLORS)]), "experiment.color")
         overlay = _boolean(item.get("overlay", True), "experiment.overlay")
-        experiments.append(Experiment(name, color, overlay))
+        comroot = _text(item["COMROOT"], "experiment.COMROOT") if "COMROOT" in item and item["COMROOT"] is not None else None
+        experiments.append(Experiment(name, color, overlay, comroot))
     if len({item.name for item in experiments}) != len(experiments):
         notices.append("Repeated experiment names: these entries query the same MATS model, not different experiments.")
     jobs = []
@@ -576,4 +606,26 @@ def build_plan(raw: Any) -> Plan:
     except ConfigError as error:
         slides = ()
         slide_error = str(error)
-    return Plan(planned_jobs, tuple(notices), _settings(raw.get("automation", {})), slides, slide_error)
+
+    pygraf_raw = raw.get("pygraf graphics slides")
+    pygraf_cfg = None
+    if pygraf_raw is not None:
+        pygraf_raw = _mapping(pygraf_raw, "pygraf graphics slides")
+        unknown = set(pygraf_raw) - {"enable", "recipe"}
+        if unknown:
+            raise ConfigError(f"Unknown pygraf graphics slides options: {sorted(unknown)}")
+        enable = _boolean(pygraf_raw.get("enable", False), "pygraf graphics slides.enable")
+        recipe_val = pygraf_raw.get("recipe")
+        recipe_str = _text(recipe_val, "pygraf graphics slides.recipe") if recipe_val is not None else None
+        pygraf_cfg = PygrafGraphicsConfig(enable=enable, recipe=recipe_str)
+
+    return Plan(
+        planned_jobs,
+        tuple(notices),
+        _settings(raw.get("automation", {})),
+        slides,
+        slide_error,
+        pygraf_graphics=pygraf_cfg,
+        experiments=tuple(experiments),
+        recipe_path=recipe_path,
+    )

@@ -52,6 +52,7 @@ def main(argv=None):
         return 0
 
     expname = None
+    comroot = None
     forward_args = []
     i = 0
     while i < len(argv):
@@ -68,6 +69,15 @@ def main(argv=None):
                 return 1
         elif arg.startswith("--expname="):
             expname = arg.split("=", 1)[1]
+        elif arg == "--comroot":
+            i += 1
+            if i < len(argv):
+                comroot = argv[i]
+            else:
+                usage("Missing value for --comroot")
+                return 1
+        elif arg.startswith("--comroot="):
+            comroot = arg.split("=", 1)[1]
         elif not arg.startswith("-") and expname is None:
             expname = arg
         else:
@@ -86,11 +96,21 @@ def main(argv=None):
     with open(baseline_recipe, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
+    # Find existing definitions in baseline.yaml if present to preserve COMROOT, etc.
+    existing_by_name = {
+        exp["name"]: exp for exp in data.get("experiments", []) if isinstance(exp, dict) and "name" in exp
+    }
+
+    base_exp = dict(existing_by_name.get(BASELINE_EXPERIMENT, {"name": BASELINE_EXPERIMENT}))
+    base_exp["color"] = "blue"
+
+    target_exp = dict(existing_by_name.get(expname, {"name": expname}))
+    target_exp["color"] = "red"
+    if comroot:
+        target_exp["COMROOT"] = comroot
+
     # Overwrite experiments for C6 baseline comparison (baseline first, then target experiment)
-    data["experiments"] = [
-        {"name": BASELINE_EXPERIMENT, "color": "blue"},
-        {"name": expname, "color": "red"},
-    ]
+    data["experiments"] = [base_exp, target_exp]
 
     # Save temporary recipe under ./tmp
     tmp_dir = ROOT / "tmp"

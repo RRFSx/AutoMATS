@@ -168,6 +168,12 @@ def main(argv=None):
         {"name": "HRRR_OPS", "color": "orange"},
     ]
 
+    # Real-time runs should always disable pygraf graphics slides
+    if "pygraf graphics slides" in data and isinstance(data["pygraf graphics slides"], dict):
+        data["pygraf graphics slides"]["enable"] = False
+    else:
+        data["pygraf graphics slides"] = {"enable": False}
+
     # Set start and end dates only when explicitly provided by the user;
     # otherwise leave unset so MATS automatically uses its dynamic latest 30-day window from the database.
     common = data.setdefault("common", {})

@@ -1,5 +1,7 @@
 """Build a local PowerPoint deck from the recipe's resolved PNG rows."""
 
+from __future__ import annotations
+
 from io import BytesIO
 import os
 from pathlib import Path
@@ -13,10 +15,13 @@ class SlideError(ValueError):
 
 
 def build_slides(plan: Plan, output: Path) -> Path:
-    if plan.slide_error is not None:
+    has_mats_slides = bool(plan.slides)
+    has_graphics_slides = bool(plan.pygraf_graphics and plan.pygraf_graphics.enable)
+
+    if plan.slide_error is not None and not has_graphics_slides:
         raise SlideError(plan.slide_error)
-    if not plan.slides:
-        raise SlideError("No slides configured; add a slides section to the recipe")
+    if not has_mats_slides and not has_graphics_slides:
+        raise SlideError("No slides configured; add a slides or pygraf graphics slides section to the recipe")
     try:
         from PIL import Image
         from pptx import Presentation
@@ -88,6 +93,10 @@ def build_slides(plan: Plan, output: Path) -> Path:
                 paragraph.alignment = PP_ALIGN.RIGHT
                 paragraph.font.size = Pt(12)
                 paragraph.font.bold = True
+
+    if has_graphics_slides:
+        from automats.graphics import process_graphics_slides
+        process_graphics_slides(plan, output, deck=deck)
 
     output.mkdir(parents=True, exist_ok=True)
     destination = output / "slides.pptx"

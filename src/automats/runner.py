@@ -1,5 +1,7 @@
 """Sequential MATS execution and local result tracking."""
 
+from __future__ import annotations
+
 from dataclasses import asdict
 from difflib import get_close_matches
 from hashlib import sha256

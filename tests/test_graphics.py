@@ -125,7 +125,26 @@ class GraphicsTests(unittest.TestCase):
         )
         self.assertEqual(remote, expected)
 
-    def test_batch_pull_graphics_files_parallel(self):
+    def test_detect_prefix_from_path(self):
+        from automats.graphics import detect_prefix_from_path
+        self.assertEqual(detect_prefix_from_path("/gpfs/f6/com/rrfs/v2.1.4"), "rrfs")
+        self.assertEqual(detect_prefix_from_path("/gpfs/f6/world-shared/com/hrrr/v4.1/"), "hrrr")
+        self.assertEqual(detect_prefix_from_path("/scratch1/com/rap/v5.0"), "rap")
+        self.assertEqual(detect_prefix_from_path("/other/path/without_com"), "")
+
+    def test_build_remote_path_auto_prefix(self):
+        remote = build_remote_path(
+            comroot="/gpfs/f6/world-shared/com/hrrr/v4.1",
+            prefix="",  # empty -> auto-detects 'hrrr'
+            cycle="2024051300",
+            wgf="det",
+            tile="full",
+            fhr=6,
+            graphics_name="cref_full_sfc_f006.png",
+        )
+        self.assertIn("/com/hrrr/v4.1/hrrr.20240513/00/graphics/det/full/202405130006/cref_full_sfc_f006.png", remote)
+
+    def test_batch_pull_graphics_files_tar(self):
         from unittest.mock import patch
         from automats.graphics import batch_pull_graphics_files
 
@@ -143,17 +162,74 @@ class GraphicsTests(unittest.TestCase):
                 {"username": "user", "port": 40896, "remote_path": "/r/3", "local_path": new_file2, "cluster": "gaeac6"},
             ]
 
-            def fake_scp(user, port, rpath, lpath):
-                lpath.write_bytes(b"downloaded")
-                return True
+            def fake_stream_tar(username, port, tasks, cluster="HPC", debug=False):
+                for rpath, lpath in tasks:
+                    lpath.write_bytes(b"downloaded")
+                return len(tasks), 0, 0
 
-            with patch("automats.graphics.scp_pull_file", side_effect=fake_scp) as mock_scp:
-                results = batch_pull_graphics_files(tasks, max_workers=2)
-                # cached_file was already present, so scp should only be called for 2 files
-                self.assertEqual(mock_scp.call_count, 2)
+            with patch("automats.graphics.stream_tar_pull", side_effect=fake_stream_tar) as mock_tar:
+                results = batch_pull_graphics_files(tasks)
+                # cached_file was already present, so stream_tar_pull should only be called once for the 2 pending files
+                self.assertEqual(mock_tar.call_count, 1)
                 self.assertTrue(results[str(cached_file)])
                 self.assertTrue(results[str(new_file1)])
                 self.assertTrue(results[str(new_file2)])
+
+    def test_stream_tar_pull_extracts_files(self):
+        import io
+        import tarfile
+        from unittest.mock import MagicMock, patch
+        from automats.graphics import stream_tar_pull
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            out_file1 = tmp / "out1.png"
+            out_file2 = tmp / "out2.png"
+
+            # Create an in-memory tar archive with two files
+            tar_bytes = io.BytesIO()
+            with tarfile.open(fileobj=tar_bytes, mode="w") as tf:
+                data1 = b"PNG_IMAGE_1"
+                ti1 = tarfile.TarInfo(name="gpfs/path/fig1.png")
+                ti1.size = len(data1)
+                tf.addfile(ti1, io.BytesIO(data1))
+
+                data2 = b"PNG_IMAGE_2"
+                ti2 = tarfile.TarInfo(name="gpfs/path/fig2.png")
+                ti2.size = len(data2)
+                tf.addfile(ti2, io.BytesIO(data2))
+
+            tar_bytes.seek(0)
+
+            mock_proc = MagicMock()
+            mock_proc.stdin = io.BytesIO()
+            mock_proc.stdout = tar_bytes
+            mock_proc.stderr = io.BytesIO()
+            mock_proc.wait.return_value = 0
+
+            tasks = [
+                ("/gpfs/path/fig1.png", out_file1),
+                ("/gpfs/path/fig2.png", out_file2),
+                ("/gpfs/path/missing.png", tmp / "missing.png"),
+            ]
+
+            with patch("subprocess.Popen", return_value=mock_proc):
+                completed, missing, errors = stream_tar_pull(
+                    username="user",
+                    port=40896,
+                    tasks=tasks,
+                    cluster="gaeac6",
+                    debug=True,
+                )
+
+            self.assertEqual(completed, 2)
+            self.assertEqual(missing, 1)
+            self.assertEqual(errors, 0)
+            self.assertTrue(out_file1.exists())
+            self.assertEqual(out_file1.read_bytes(), b"PNG_IMAGE_1")
+            self.assertTrue(out_file2.exists())
+            self.assertEqual(out_file2.read_bytes(), b"PNG_IMAGE_2")
+            self.assertFalse((tmp / "missing.png").exists())
 
 
 if __name__ == "__main__":

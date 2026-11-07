@@ -23,7 +23,7 @@ experiments:
 
 pygraf graphics slides:
   enable: true
-  recipe: graphics_May2024_layout2.yaml
+  recipe: graphics_slides_layout2_May2024.yaml
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # detailed recipes

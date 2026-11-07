@@ -5,20 +5,22 @@ Handles:
   1. Parsing pygraf graphics layout recipes (same valid time, same cycle).
   2. Resolving experiments and COMROOT locations on HPC systems (e.g. gaeac6).
   3. Verifying local SSH tunnel readiness; skipping and prompting users if offline.
-  4. Pulling remote graphic files via SCP over local forwarded ports.
+  4. Pulling remote graphic files via streaming tar over local SSH tunnel.
   5. Generating OBS and missing-image placeholders.
   6. Rendering graphic slides into the presentation deck.
 """
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tarfile
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -151,6 +153,25 @@ def compute_valid_time(cycle: str | int, fhr: int) -> Tuple[str, str, str]:
     return pdy, cyc, valid_time_dir
 
 
+def detect_prefix_from_path(comroot: str) -> str:
+    """
+    Extracts the model prefix from a COMROOT path.
+    E.g. /gpfs/f6/.../com/rrfs/v2.1.4 -> rrfs
+         /com/hrrr/v4.1 -> hrrr
+         /scratch1/.../com/rap/v5.0 -> rap
+    """
+    clean = comroot.rstrip("/")
+    m = re.search(r"/com/([^/]+)(?:/|$)", clean)
+    if m:
+        return m.group(1)
+    parts = clean.split("/")
+    if "com" in parts:
+        idx = parts.index("com")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return ""
+
+
 def build_remote_path(
     comroot: str,
     prefix: str,
@@ -166,6 +187,8 @@ def build_remote_path(
     """
     pdy, cyc, valid_time_dir = compute_valid_time(cycle, fhr)
     clean_comroot = comroot.rstrip("/")
+    if not prefix:
+        prefix = detect_prefix_from_path(clean_comroot) or "rrfs"
     return f"{clean_comroot}/{prefix}.{pdy}/{cyc}/graphics/{wgf}/{tile}/{valid_time_dir}/{graphics_name}"
 
 
@@ -255,77 +278,174 @@ def cleanup_empty_directories(root_dir: Path) -> int:
     return removed_count
 
 
-def is_transient_ssh_error(err_msg: str) -> bool:
-    """Returns True if the SCP error is a transient multiplexer or connection hiccup."""
-    msg = err_msg.lower()
-    markers = [
-        "session open refused by peer",
-        "mux_client_request_session",
-        "connection closed",
-        "connection reset",
-        "broken pipe",
-        "channel_open_failure",
-        "resource shortage",
-        "administratively prohibited",
-        "session request failed",
-    ]
-    return any(marker in msg for marker in markers)
-
-
-def scp_pull_file(
+def stream_tar_pull(
     username: str,
     port: int,
-    remote_path: str,
-    local_path: Path,
-    max_retries: int = 3,
-) -> bool:
-    """Pulls a single remote file via SCP over forwarded SSH port with backoff retry on transient multiplexer congestion."""
-    if local_path.exists() and local_path.stat().st_size > 0:
-        return True
-    local_path.parent.mkdir(parents=True, exist_ok=True)
+    tasks: List[Tuple[str, Path]],
+    cluster: str = "HPC",
+    debug: bool = False,
+) -> Tuple[int, int, int]:
+    """
+    Downloads remote files using a single streaming tar session over SSH.
+    - Sends all remote file paths to remote `tar -P -cf - --null -T -` via stdin.
+    - Reads the incoming byte stream locally via `tarfile.open(mode='r|*')`.
+    - Directly writes each member file to its target destination folder.
+    - Missing files are ignored by remote tar and recorded as missing locally.
+    Returns (completed_count, missing_count, error_count).
+    """
+    if not tasks:
+        return 0, 0, 0
+
+    path_map: Dict[str, Path] = {r.lstrip("/"): l for r, l in tasks}
+    norm_to_remote: Dict[str, str] = {r.lstrip("/"): r for r, _ in tasks}
+    received_remote_paths: set = set()
+    total_tasks = len(tasks)
+
+    # Pack paths separated by null byte \0 for tar --null -T -
+    path_data = ("\0".join(r for r, _ in tasks) + "\0").encode("utf-8")
+
     cmd = [
-        "scp",
-        "-P", str(port),
+        "ssh",
+        "-p", str(port),
         "-o", "BatchMode=yes",
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "StrictHostKeyChecking=no",
         "-o", "LogLevel=ERROR",
-        f"{username}@localhost:{remote_path}",
-        str(local_path),
+        f"{username}@localhost",
+        "tar -P -cf - --null -T -",
     ]
-    for attempt in range(1, max_retries + 1):
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Feeder thread: writes paths to stdin and closes it
+    def feed_stdin():
         try:
-            proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-            ok = proc.returncode == 0 and local_path.exists() and local_path.stat().st_size > 0
-            if ok:
-                return True
-            if local_path.exists() and local_path.stat().st_size == 0:
-                local_path.unlink(missing_ok=True)
-            err = proc.stderr.strip() if proc.stderr else ""
-            if attempt < max_retries and is_transient_ssh_error(err):
-                time.sleep(0.4 * attempt)
-                continue
-            return False
-        except Exception as e:
-            if local_path.exists() and local_path.stat().st_size == 0:
-                local_path.unlink(missing_ok=True)
-            if attempt < max_retries and is_transient_ssh_error(str(e)):
-                time.sleep(0.4 * attempt)
-                continue
-            return False
-    return False
+            if proc.stdin:
+                proc.stdin.write(path_data)
+                proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+    t_in = threading.Thread(target=feed_stdin, daemon=True)
+    t_in.start()
+
+    # Stderr reader thread: drains stderr to prevent pipe buffer deadlock
+    stderr_lines: List[str] = []
+
+    def drain_stderr():
+        try:
+            if proc.stderr:
+                for line in iter(proc.stderr.readline, b""):
+                    clean = line.decode("utf-8", errors="ignore").strip()
+                    if clean:
+                        stderr_lines.append(clean)
+        except Exception:
+            pass
+
+    t_err = threading.Thread(target=drain_stderr, daemon=True)
+    t_err.start()
+
+    completed = 0
+    errors = 0
+
+    try:
+        if proc.stdout:
+            with tarfile.open(fileobj=proc.stdout, mode="r|*") as tar_stream:
+                for member in tar_stream:
+                    if not member.isfile():
+                        continue
+                    norm = member.name.lstrip("/")
+                    dest = path_map.get(norm)
+                    if not dest:
+                        continue
+
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        fin = tar_stream.extractfile(member)
+                        if fin:
+                            with dest.open("wb") as fout:
+                                shutil.copyfileobj(fin, fout, length=64 * 1024)
+                            if dest.exists() and dest.stat().st_size > 0:
+                                completed += 1
+                                orig_r = norm_to_remote.get(norm, norm)
+                                received_remote_paths.add(orig_r)
+                            elif dest.exists() and dest.stat().st_size == 0:
+                                dest.unlink(missing_ok=True)
+                    except Exception as e:
+                        errors += 1
+                        if debug:
+                            print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+
+                    total_done = completed + errors
+                    if total_done % 10 == 0 or total_done == total_tasks:
+                        pct = int(100 * total_done / total_tasks)
+                        print(f"  Progress: {total_done}/{total_tasks} ({pct}%) [{completed} ok]", flush=True)
+
+    except tarfile.ReadError:
+        # Happens if stream is empty (i.e. all files were missing on remote)
+        pass
+    except (subprocess.SubprocessError, OSError) as e:
+        if completed == 0:
+            errors += 1
+            print(f"[!] Error reading tar stream: {e}", file=sys.stderr)
+    finally:
+        t_in.join(timeout=3.0)
+        t_err.join(timeout=3.0)
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    missing_tasks = [(r, l) for r, l in tasks if r not in received_remote_paths]
+    missing = len(missing_tasks)
+
+    if total_tasks > 0 and (completed + errors < total_tasks or (completed + errors) % 10 != 0):
+        pct = int(100 * (completed + errors) / total_tasks)
+        if missing > 0:
+            print(f"  Progress: {total_tasks}/{total_tasks} ({pct}%) [{completed} ok, {missing} missing]", flush=True)
+        else:
+            print(f"  Progress: {total_tasks}/{total_tasks} ({pct}%) [{completed} ok]", flush=True)
+
+    # In debug mode, list missing files
+    if debug and missing > 0:
+        for r_path, _ in missing_tasks:
+            print(f"  [DEBUG] Missing on {cluster}: {Path(r_path).name}\n          Remote path: {r_path}", file=sys.stderr)
+
+    if debug and stderr_lines:
+        unexpected = [
+            line for line in stderr_lines
+            if "Cannot stat: No such file or directory" not in line
+            and "Error exit delayed" not in line
+            and "Removing leading" not in line
+        ]
+        if unexpected:
+            print(f"\n[DEBUG] Remote stderr output:", file=sys.stderr)
+            for u in unexpected[:10]:
+                print(f"  {u}", file=sys.stderr)
+
+    return completed, missing, errors
 
 
-def batch_pull_graphics_files(tasks: List[Dict[str, Any]], max_workers: int = 3) -> Dict[str, bool]:
+def batch_pull_graphics_files(
+    tasks: List[Dict[str, Any]],
+    max_workers: int = 1,
+    debug: bool = False,
+) -> Dict[str, bool]:
     """
-    Downloads uncached graphic files concurrently using a ThreadPoolExecutor.
-    Maintains a safe worker limit (default: 3) to prevent exceeding sshd connection limits.
+    Downloads uncached graphic files using single-session streaming tar over SSH per HPC endpoint.
+    Eliminates SSH multiplexer connection exhaustion and OpenSSH session rate limits.
     """
     results: Dict[str, bool] = {}
     pending: List[Dict[str, Any]] = []
 
     for t in tasks:
-        loc = t["local_path"]
+        loc = Path(t["local_path"])
         if loc.exists() and loc.stat().st_size > 0:
             results[str(loc)] = True
         else:
@@ -334,42 +454,39 @@ def batch_pull_graphics_files(tasks: List[Dict[str, Any]], max_workers: int = 3)
     if not pending:
         return results
 
-    # Deduplicate pending tasks by (port, remote_path, local_path)
+    # Deduplicate pending tasks by (port, remote_path, str(local_path))
     unique_pending: Dict[Tuple[int, str, str], Dict[str, Any]] = {}
     for t in pending:
         key = (t["port"], t["remote_path"], str(t["local_path"]))
         unique_pending[key] = t
 
-    workers = max(1, min(max_workers, len(unique_pending), 4))
-    print(f"[*] Downloading {len(unique_pending)} graphics figure(s) via SCP (parallel workers: {workers})...", flush=True)
+    # Group tasks by remote endpoint: (username, port, cluster)
+    endpoints: Dict[Tuple[str, int, str], List[Tuple[str, Path]]] = {}
+    for t in unique_pending.values():
+        ep_key = (t["username"], t["port"], t.get("cluster", "HPC"))
+        if ep_key not in endpoints:
+            endpoints[ep_key] = []
+        endpoints[ep_key].append((t["remote_path"], Path(t["local_path"])))
 
     try:
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            future_map = {}
-            for t in unique_pending.values():
-                fut = executor.submit(
-                    scp_pull_file,
-                    t["username"],
-                    t["port"],
-                    t["remote_path"],
-                    t["local_path"],
-                )
-                future_map[fut] = t
-                if workers > 1:
-                    time.sleep(0.015)
-            for future in as_completed(future_map):
-                task = future_map[future]
-                loc_str = str(task["local_path"])
-                try:
-                    ok = future.result()
-                    results[loc_str] = ok
-                except Exception as e:
-                    results[loc_str] = False
-                    print(f"[!] Warning: Error retrieving {task['remote_path']}: {e}", file=sys.stderr)
+        for (user, port, cluster), cluster_tasks in endpoints.items():
+            print(
+                f"[*] Downloading {len(cluster_tasks)} graphics figure(s) from {cluster} via streaming tar over SSH...",
+                flush=True,
+            )
+            stream_tar_pull(
+                username=user,
+                port=port,
+                tasks=cluster_tasks,
+                cluster=cluster,
+                debug=debug,
+            )
+            for _, l_path in cluster_tasks:
+                results[str(l_path)] = l_path.exists() and l_path.stat().st_size > 0
     finally:
         # Clean up empty experiment directories if no files were downloaded
         for t in unique_pending.values():
-            loc = t["local_path"]
+            loc = Path(t["local_path"])
             cleanup_empty_directories(loc.parent)
 
     return results
@@ -480,7 +597,7 @@ def process_graphics_slides(
     transfer_tasks: List[Dict[str, Any]] = []
     for spec in slides_config:
         slide_type = str(spec.get("type", "same valid time")).strip().lower().replace("_", " ")
-        prefix = spec.get("prefix", "rrfs")
+        prefix = spec.get("prefix")
         wgf = spec.get("WGF", "det")
         tile_override = spec.get("tile")
         cycle = spec.get("cycle")
@@ -548,7 +665,7 @@ def process_graphics_slides(
                         })
 
     if transfer_tasks:
-        batch_pull_graphics_files(transfer_tasks, max_workers=4)
+        batch_pull_graphics_files(transfer_tasks)
 
     # 4. Phase 2: Render each graphics slide into PowerPoint deck
     from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN

@@ -4,7 +4,6 @@
 graphics slides:
 - type: same valid time
   title: Composite Reflectivity
-  prefix: rrfs
   WGF: det
   graphics name: cref_full_sfc_f006.png
   cycle: 2024050700
@@ -14,7 +13,6 @@ graphics slides:
 
 - type: same cycle
   title: Composite Reflectivity
-  prefix: rrfs
   WGF: det
   experiment: second
   cycle: 2024050700

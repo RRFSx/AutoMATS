@@ -1,0 +1,17 @@
+#  download selected pygraf graphics from HPC
+#
+
+COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
+prefix: rrfs
+WGF: [det]  # det, enkf
+cycle and fhr:  # each graphic file can set up this individually, otherwise use this default
+  cycle: [2024050610-2024051300]  # a date range or a list of dates
+  fhr:
+  - default: [0,1]  # a range or a list of forecast lead hours
+  - '00,12': [0-12]
+
+tile: [full]  # full  NC  NE  NW  SC  SE  SW EastCO 
+
+graphics name template:
+- cref_{tile}_sfc_f{fhr}.png
+- temp_{tile}_2m_f{fhr}.png

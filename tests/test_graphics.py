@@ -89,7 +89,7 @@ class GraphicsTests(unittest.TestCase):
         self.assertEqual(fhr, 12)
 
     def test_valid_time_dir_formatting(self):
-        # YYYYMMDDxxxx where xxxx is 4-digit forecast lead hour
+        # <PDY><cyc><fhr:02d>
         pdy, cyc, valid_dir = compute_valid_time("2024051300", 6)
         self.assertEqual(pdy, "20240513")
         self.assertEqual(cyc, "00")
@@ -98,10 +98,16 @@ class GraphicsTests(unittest.TestCase):
         pdy, cyc, valid_dir = compute_valid_time("2024051300", 0)
         self.assertEqual(valid_dir, "202405130000")
 
+        # Example from user: 2024050612 and fhr 2 -> 202405061202
+        pdy, cyc, valid_dir = compute_valid_time("2024050612", 2)
+        self.assertEqual(pdy, "20240506")
+        self.assertEqual(cyc, "12")
+        self.assertEqual(valid_dir, "202405061202")
+
         pdy, cyc, valid_dir = compute_valid_time("2024050712", 24)
         self.assertEqual(pdy, "20240507")
         self.assertEqual(cyc, "12")
-        self.assertEqual(valid_dir, "202405070024")
+        self.assertEqual(valid_dir, "202405071224")
 
     def test_build_remote_path(self):
         remote = build_remote_path(

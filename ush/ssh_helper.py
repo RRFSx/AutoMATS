@@ -102,7 +102,7 @@ def get_default_config_path() -> Path:
 # Port Calculation, Banner Detection & Multiplexing Infrastructure
 # ==============================================================================
 
-DEFAULT_IDLE_TIMEOUT = 10800  # 3 hours
+DEFAULT_IDLE_TIMEOUT = 0  # 0 = keep alive indefinitely until connection lost
 
 
 def is_bastion_host(host: str) -> bool:
@@ -690,7 +690,15 @@ def run_worker_server(
         os.dup2(slave, 1)
         os.dup2(slave, 2)
         os.close(slave)
-        ssh_cmd = ["ssh", "-tt", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-S", str(master_ssh_sock)]
+        ssh_cmd = [
+            "ssh",
+            "-tt",
+            "-o", "BatchMode=yes",
+            "-o", "ControlMaster=no",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=60",
+            "-S", str(master_ssh_sock),
+        ]
         if port and int(port) != 22:
             ssh_cmd.extend(["-p", str(port)])
         ssh_cmd.append(f"{user}@{host}")
@@ -784,6 +792,7 @@ def run_worker_server(
         return
 
     last_active = time.time()
+    last_keepalive = time.time()
     while True:
         try:
             r, _, _ = select.select([srv, master], [], [], 5.0)
@@ -791,6 +800,7 @@ def run_worker_server(
                 try:
                     c = os.read(master, 4096)
                     if not c:
+                        # Remote connection closed by remote host
                         break
                 except OSError:
                     break
@@ -814,9 +824,26 @@ def run_worker_server(
                 if req.get("cmd") == "exit":
                     conn.close()
                     break
+                cmd_to_run = req.get("cmd", "")
+                if cmd_to_run and cmd_to_run != "ping":
+                    try:
+                        os.write(master, f"{cmd_to_run}\n".encode())
+                    except OSError:
+                        pass
                 conn.sendall(json.dumps({"code": 0, "output": "ok"}).encode("utf-8") + b"\n")
                 conn.close()
-            if time.time() - last_active > idle_timeout:
+
+            now = time.time()
+            # Periodically write keepalive comment to headnode PTY every 60s
+            # This resets the remote shell $TMOUT inactivity timer and keeps the session alive
+            if now - last_keepalive >= 60.0:
+                try:
+                    os.write(master, b"# keepalive\n")
+                    last_keepalive = now
+                except OSError:
+                    break
+
+            if idle_timeout > 0 and (now - last_active > idle_timeout):
                 break
         except Exception:
             break
@@ -843,6 +870,7 @@ def spawn_worker(
     port: int = 22,
     default_node: Optional[str] = None,
     detected_port_file: Optional[str] = None,
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
 ) -> None:
     """Daemonize and start the background interactive shell worker."""
     if os.path.exists(sock_path):
@@ -868,6 +896,7 @@ def spawn_worker(
                 host=host,
                 port=port,
                 default_node=default_node,
+                idle_timeout=idle_timeout,
                 detected_port_file=detected_port_file,
             )
         os._exit(0)
@@ -879,6 +908,7 @@ def ensure_background_interactive_session(
     hpc_address: str,
     hpc: str,
     default_node: Optional[str] = None,
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
 ) -> Tuple[bool, Optional[int]]:
     """
     Step 2a: Launches a persistent background interactive session to the compute head node
@@ -908,6 +938,7 @@ def ensure_background_interactive_session(
         host=hpc_address,
         default_node=node,
         detected_port_file=port_file,
+        idle_timeout=idle_timeout,
     )
 
     # Poll for worker socket readiness (up to 55s to allow bastion & headnode login)
@@ -945,6 +976,8 @@ def establish_master_connection(username: str, hpc_address: str, hpc: str) -> bo
     cmd = [
         "ssh",
         "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=60",
         "-N", "-f",
         f"{username}@{hpc_address}",
     ]
@@ -974,6 +1007,7 @@ def setup_background_port_forward(
     hpc: str,
     default_node: Optional[str] = None,
     skip_bg_session: bool = False,
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
 ) -> bool:
     """
     Step 2 of user plan:
@@ -984,7 +1018,9 @@ def setup_background_port_forward(
         print("\n" + "=" * 70)
         print(f"[*] STEP 2: CREATE PORT FORWARDING ({hpc.upper()})")
         print("=" * 70)
-        ensure_background_interactive_session(username, hpc_address, hpc, default_node=default_node)
+        ensure_background_interactive_session(
+            username, hpc_address, hpc, default_node=default_node, idle_timeout=idle_timeout
+        )
 
     # Part B: Run local port forwarding
     print(f"[*] Setting up port forward: localhost:{my_local_port} -> {hpc_address}:localhost:{remote_local_port}")
@@ -1008,6 +1044,8 @@ def setup_background_port_forward(
         "ssh",
         "-o", "BatchMode=yes",
         "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=60",
         "-N", "-f",
         f"-L{my_local_port}:localhost:{remote_local_port}",
         f"{username}@{hpc_address}",
@@ -1030,6 +1068,7 @@ def establish_tunnel(
     remote_local_port: Optional[int],
     hpc: str,
     config_path: Path,
+    idle_timeout: int = DEFAULT_IDLE_TIMEOUT,
 ) -> Tuple[bool, int, int]:
     """
     Coordinates Step 1 and Step 2 of user plan:
@@ -1048,7 +1087,9 @@ def establish_tunnel(
     print(f"[*] STEP 2: CREATE PORT FORWARDING ({hpc.upper()})")
     print("=" * 70)
 
-    bg_ok, detected_port = ensure_background_interactive_session(username, hpc_address, hpc)
+    bg_ok, detected_port = ensure_background_interactive_session(
+        username, hpc_address, hpc, idle_timeout=idle_timeout
+    )
     if not bg_ok:
         print(f"[!] Warning: Background interactive session to head node reported an issue.", file=sys.stderr)
 
@@ -1086,6 +1127,7 @@ def establish_tunnel(
         remote_local_port=remote_local_port,
         hpc=hpc,
         skip_bg_session=True,
+        idle_timeout=idle_timeout,
     ):
         return False, my_local_port, remote_local_port
 
@@ -1113,6 +1155,8 @@ def login_local_port(username: str, my_local_port: int, hpc: str) -> bool:
         "-o", "UserKnownHostsFile=/dev/null",
         "-o", "StrictHostKeyChecking=no",
         "-o", "LogLevel=ERROR",
+        "-o", "ServerAliveInterval=30",
+        "-o", "ServerAliveCountMax=60",
         "-p", str(my_local_port),
         f"{username}@localhost",
         "true",
@@ -1265,6 +1309,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to .hpc_config file (default: searches CWD and AutoMATS root)",
     )
+    parser.add_argument(
+        "--idle-timeout",
+        type=int,
+        default=DEFAULT_IDLE_TIMEOUT,
+        help="Inactivity timeout in seconds before background session exits (default: 0 = keep alive indefinitely until connection lost)",
+    )
 
     return parser.parse_args()
 
@@ -1374,6 +1424,7 @@ def main() -> int:
         remote_local_port=remote_local_port,
         hpc=hpc,
         config_path=config_path,
+        idle_timeout=args.idle_timeout,
     )
 
     if not tunnel_ok:

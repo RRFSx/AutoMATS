@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
@@ -137,16 +138,16 @@ def parse_graphics_name(filename: str) -> Tuple[str, str, int]:
 
 def compute_valid_time(cycle: str | int, fhr: int) -> Tuple[str, str, str]:
     """
-    Given cycle (e.g. 2024051300) and forecast hour (e.g. 6):
+    Given cycle (e.g. 2024050612) and forecast hour (e.g. 2):
     Returns (pdy, cyc, valid_time_dir).
-    valid_time_dir is YYYYMMDDxxxx where xxxx is 4-digit forecast lead hour (e.g. 202405130006).
+    valid_time_dir is <PDY><cyc><fhr:02d> (e.g. 202405061202).
     """
     c_str = str(cycle).strip()
     if len(c_str) < 10:
         raise ValueError(f"Cycle must be at least 10 characters (YYYYMMDDHH), got: {c_str}")
     pdy = c_str[:8]
     cyc = c_str[8:10]
-    valid_time_dir = f"{pdy}{fhr:04d}"
+    valid_time_dir = f"{pdy}{cyc}{fhr:02d}"
     return pdy, cyc, valid_time_dir
 
 
@@ -230,8 +231,55 @@ def get_missing_placeholder(output_dir: Path, name: str) -> Path:
     return path
 
 
-def scp_pull_file(username: str, port: int, remote_path: str, local_path: Path) -> bool:
-    """Pulls a single remote file via SCP over the forwarded SSH port."""
+def cleanup_empty_directories(root_dir: Path) -> int:
+    """Recursively removes empty directories under root_dir bottom-up."""
+    removed_count = 0
+    if not root_dir.exists() or not root_dir.is_dir():
+        return 0
+
+    for dirpath, dirnames, filenames in os.walk(str(root_dir), topdown=False):
+        d = Path(dirpath)
+        try:
+            items = [item for item in d.iterdir() if item.name != ".DS_Store"]
+            if not items:
+                for item in d.iterdir():
+                    try:
+                        item.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                d.rmdir()
+                removed_count += 1
+        except OSError:
+            pass
+
+    return removed_count
+
+
+def is_transient_ssh_error(err_msg: str) -> bool:
+    """Returns True if the SCP error is a transient multiplexer or connection hiccup."""
+    msg = err_msg.lower()
+    markers = [
+        "session open refused by peer",
+        "mux_client_request_session",
+        "connection closed",
+        "connection reset",
+        "broken pipe",
+        "channel_open_failure",
+        "resource shortage",
+        "administratively prohibited",
+        "session request failed",
+    ]
+    return any(marker in msg for marker in markers)
+
+
+def scp_pull_file(
+    username: str,
+    port: int,
+    remote_path: str,
+    local_path: Path,
+    max_retries: int = 3,
+) -> bool:
+    """Pulls a single remote file via SCP over forwarded SSH port with backoff retry on transient multiplexer congestion."""
     if local_path.exists() and local_path.stat().st_size > 0:
         return True
     local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -245,17 +293,33 @@ def scp_pull_file(username: str, port: int, remote_path: str, local_path: Path) 
         f"{username}@localhost:{remote_path}",
         str(local_path),
     ]
-    try:
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        return proc.returncode == 0 and local_path.exists() and local_path.stat().st_size > 0
-    except Exception:
-        return False
+    for attempt in range(1, max_retries + 1):
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            ok = proc.returncode == 0 and local_path.exists() and local_path.stat().st_size > 0
+            if ok:
+                return True
+            if local_path.exists() and local_path.stat().st_size == 0:
+                local_path.unlink(missing_ok=True)
+            err = proc.stderr.strip() if proc.stderr else ""
+            if attempt < max_retries and is_transient_ssh_error(err):
+                time.sleep(0.4 * attempt)
+                continue
+            return False
+        except Exception as e:
+            if local_path.exists() and local_path.stat().st_size == 0:
+                local_path.unlink(missing_ok=True)
+            if attempt < max_retries and is_transient_ssh_error(str(e)):
+                time.sleep(0.4 * attempt)
+                continue
+            return False
+    return False
 
 
-def batch_pull_graphics_files(tasks: List[Dict[str, Any]], max_workers: int = 4) -> Dict[str, bool]:
+def batch_pull_graphics_files(tasks: List[Dict[str, Any]], max_workers: int = 3) -> Dict[str, bool]:
     """
     Downloads uncached graphic files concurrently using a ThreadPoolExecutor.
-    Maintains a safe worker limit (default: 4) to prevent exceeding sshd connection limits.
+    Maintains a safe worker limit (default: 3) to prevent exceeding sshd connection limits.
     """
     results: Dict[str, bool] = {}
     pending: List[Dict[str, Any]] = []
@@ -276,31 +340,37 @@ def batch_pull_graphics_files(tasks: List[Dict[str, Any]], max_workers: int = 4)
         key = (t["port"], t["remote_path"], str(t["local_path"]))
         unique_pending[key] = t
 
-    workers = min(max_workers, len(unique_pending))
+    workers = max(1, min(max_workers, len(unique_pending), 4))
     print(f"[*] Downloading {len(unique_pending)} graphics figure(s) via SCP (parallel workers: {workers})...", flush=True)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_map = {
-            executor.submit(
-                scp_pull_file,
-                t["username"],
-                t["port"],
-                t["remote_path"],
-                t["local_path"],
-            ): t
-            for t in unique_pending.values()
-        }
-        for future in as_completed(future_map):
-            task = future_map[future]
-            loc_str = str(task["local_path"])
-            try:
-                ok = future.result()
-                results[loc_str] = ok
-                if not ok:
-                    print(f"[!] Warning: Remote file not found on {task['cluster']}: {task['remote_path']}", file=sys.stderr)
-            except Exception as e:
-                results[loc_str] = False
-                print(f"[!] Warning: Error retrieving {task['remote_path']}: {e}", file=sys.stderr)
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {}
+            for t in unique_pending.values():
+                fut = executor.submit(
+                    scp_pull_file,
+                    t["username"],
+                    t["port"],
+                    t["remote_path"],
+                    t["local_path"],
+                )
+                future_map[fut] = t
+                if workers > 1:
+                    time.sleep(0.015)
+            for future in as_completed(future_map):
+                task = future_map[future]
+                loc_str = str(task["local_path"])
+                try:
+                    ok = future.result()
+                    results[loc_str] = ok
+                except Exception as e:
+                    results[loc_str] = False
+                    print(f"[!] Warning: Error retrieving {task['remote_path']}: {e}", file=sys.stderr)
+    finally:
+        # Clean up empty experiment directories if no files were downloaded
+        for t in unique_pending.values():
+            loc = t["local_path"]
+            cleanup_empty_directories(loc.parent)
 
     return results
 

@@ -64,7 +64,7 @@ DEFAULT_HEAD_NODES: Dict[str, str] = {
     "hera": "hfe01",
 }
 
-PROMPT_REGEX = re.compile(r'\[.*?@?[\w\.\-]+.*?\]\s*[\$#>]\s*$|[\w\.\-]+[^\n\r]*[\$#>]\s*$')
+PROMPT_REGEX = re.compile(r'\[.*?@?[\w\.\-]+.*?\]\s*[\$#>%]\s*$|[\w\.\-]+[^\n\r]*[\$#>%]\s*$|[\$#>%]\s*$')
 
 PORT_DETECTION_PATTERNS = [
     re.compile(r"(?:assigned|allocated|tunnel|forwarded|remote|local)\s+port[^\d\n]*?(\d{4,5})", re.IGNORECASE),
@@ -561,7 +561,7 @@ def select_working_address(hpc: str) -> str:
             f"Unsupported HPC cluster '{hpc}'. Supported options: {list(HPC_ENDPOINTS.keys())}"
         )
 
-    print(f"[*] Testing reachability for '{hpc}' endpoints...")
+    print(f"[*] Ping '{hpc}' endpoints...")
     for idx, addr in enumerate(endpoints, 1):
         print(f"    [{idx}/{len(endpoints)}] Checking {addr}:22 ...", end=" ", flush=True)
         if is_port_open(addr, 22, timeout=3.0):
@@ -635,13 +635,27 @@ def is_master_alive(username: str, host: str, port: int = 22) -> bool:
         return False
 
 
+def cleanup_local_known_hosts(port: int) -> None:
+    """Removes stale localhost:<port> key from ~/.ssh/known_hosts to avoid host key warnings."""
+    try:
+        subprocess.run(
+            ["ssh-keygen", "-R", f"[localhost]:{port}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def test_local_access(username: str, local_port: int, timeout: float = 3.0) -> bool:
     """Tests whether we can actually access through the local port."""
     cmd = [
         "ssh",
         "-o", "BatchMode=yes",
         "-o", f"ConnectTimeout={int(timeout)}",
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "LogLevel=ERROR",
         "-p", str(local_port),
         f"{username}@localhost",
         "true",
@@ -884,11 +898,9 @@ def ensure_background_interactive_session(
             pass
 
     if is_socket_alive(worker_sock):
-        print(f"[✓] Background interactive session already active ({node}).")
         detected = detect_remote_port(hpc, username, worker_sock)
         return True, detected
 
-    print(f"[*] Launching background interactive session to {node} ...", end=" ", flush=True)
     spawn_worker(
         sock_path=worker_sock,
         master_ssh_sock=master_sock,
@@ -898,17 +910,16 @@ def ensure_background_interactive_session(
         detected_port_file=port_file,
     )
 
-    # Poll for worker socket readiness (up to 15s)
+    # Poll for worker socket readiness (up to 55s to allow bastion & headnode login)
     t0 = time.time()
-    while time.time() - t0 < 15:
+    while time.time() - t0 < 55:
         if is_socket_alive(worker_sock):
-            print("READY [✓]")
             detected = detect_remote_port(hpc, username, worker_sock)
             return True, detected
         time.sleep(0.3)
 
     print("TIMEOUT [!]")
-    print(f"[!] Warning: Background interactive session did not become ready within 15s.", file=sys.stderr)
+    print(f"[!] Warning: Background interactive session did not become ready within 55s.", file=sys.stderr)
     return False, detect_remote_port(hpc, username)
 
 
@@ -948,7 +959,7 @@ def establish_master_connection(username: str, hpc_address: str, hpc: str) -> bo
 
     time.sleep(1.0)
     if is_master_alive(username, hpc_address):
-        print(f"[✓] Step 1 complete: ControlMaster connection established on {hpc_address}.")
+        print(f"[✓]  Complete: ControlMaster connection established on {hpc_address}.")
         return True
     else:
         print(f"[!] Warning: ControlMaster socket not detected for {hpc_address}.", file=sys.stderr)
@@ -971,7 +982,7 @@ def setup_background_port_forward(
     """
     if not skip_bg_session:
         print("\n" + "=" * 70)
-        print(f"[*] STEP 2: BACKGROUND INTERACTIVE SESSION & PORT FORWARDING ({hpc.upper()})")
+        print(f"[*] STEP 2: CREATE PORT FORWARDING ({hpc.upper()})")
         print("=" * 70)
         ensure_background_interactive_session(username, hpc_address, hpc, default_node=default_node)
 
@@ -989,7 +1000,7 @@ def setup_background_port_forward(
     res = subprocess.run(cmd_fwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if res.returncode == 0:
         time.sleep(0.5)
-        print(f"[✓] Step 2 complete: Port forwarding active on localhost:{my_local_port}.")
+        print(f"[✓] Complete: Port forwarding active on localhost:{my_local_port}.")
         return True
 
     # 2. Fallback to multiplexed background session with BatchMode
@@ -1005,7 +1016,7 @@ def setup_background_port_forward(
     time.sleep(1.0)
 
     if is_local_port_in_use(my_local_port):
-        print(f"[✓] Step 2 complete: Tunnel listening on localhost:{my_local_port}.")
+        print(f"[✓] Complete: Tunnel listening on localhost:{my_local_port}.")
         return True
     else:
         print(f"[!] Warning: Local port {my_local_port} is not listening.", file=sys.stderr)
@@ -1032,9 +1043,9 @@ def establish_tunnel(
     if not establish_master_connection(username, hpc_address, hpc):
         return False, my_local_port or 0, remote_local_port or 0
 
-    # Step 2: Background interactive session to head node & port forwarding
+    # Step 2: Create port forwarding
     print("\n" + "=" * 70)
-    print(f"[*] STEP 2: BACKGROUND INTERACTIVE SESSION & PORT FORWARDING ({hpc.upper()})")
+    print(f"[*] STEP 2: CREATE PORT FORWARDING ({hpc.upper()})")
     print("=" * 70)
 
     bg_ok, detected_port = ensure_background_interactive_session(username, hpc_address, hpc)
@@ -1095,10 +1106,13 @@ def login_local_port(username: str, my_local_port: int, hpc: str) -> bool:
     print("-" * 70 + "\n")
 
     cleanup_stale_master(username, "localhost", my_local_port)
+    cleanup_local_known_hosts(my_local_port)
 
     cmd = [
         "ssh",
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "LogLevel=ERROR",
         "-p", str(my_local_port),
         f"{username}@localhost",
         "true",
@@ -1108,7 +1122,7 @@ def login_local_port(username: str, my_local_port: int, hpc: str) -> bool:
         try:
             proc = subprocess.run(cmd)
             if proc.returncode == 0:
-                print(f"[✓] Step 3 complete: Connected through localhost:{my_local_port}.")
+                print(f"[✓] Complete: Connected through localhost:{my_local_port}.")
                 return True
             if attempt == 0:
                 time.sleep(1.5)
@@ -1331,7 +1345,7 @@ def main() -> int:
 
     # Step 3: Check if local port access is ALREADY established and usable right now!
     if my_local_port:
-        print(f"[*] Checking if local port access (localhost:{my_local_port}) is already usable...", end=" ", flush=True)
+        print("[*] Checking local port connection...", end=" ", flush=True)
         if test_local_access(username, my_local_port, timeout=2.0):
             print("ACTIVE [✓]")
             print(f"[✓] SSH tunnel for {hpc} is active on localhost:{my_local_port}.")
@@ -1377,7 +1391,7 @@ def main() -> int:
     print(f"[*] Verifying access through localhost:{final_local} ...", end=" ", flush=True)
     if test_local_access(username, final_local, timeout=3.0):
         print("ACTIVE [✓]")
-        print(f"[✓] SSH tunnel for {hpc} is verified and ready on localhost:{final_local}.")
+        print("[✓]  All good!")
         return 0
     else:
         print("FAILED [!]")

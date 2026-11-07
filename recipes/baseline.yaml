@@ -7,7 +7,7 @@
 #   radar_dieoff:      cref, csi+freq, treshold25, threshold35, threshold45
 #   ceiling_dieoff:    csi+freq, treshold500, threshold1000, threshold3000, threshold6000
 #   visibility_dieoff: csi+freq, treshold1, threshold3, threshold5, threshold10
-#
+#   graphics: CREF_full
 
 experiments:
 - name: RRFSv2_conus_3km_ret_v2x_retv4
@@ -15,11 +15,15 @@ experiments:
   #COMROOT: /gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
 - name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
   color: blue
+  #COMROOT: /gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
 - name: HRRR_OPS
   color: orange
 #- name: RRFS_A
 #  color: "#5F5F5F"
 
+pygraf graphics slides:
+  enable: true
+  #recipe: mygraphics.yaml  # for specifying a special graphics recipe
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # detailed recipes
@@ -221,20 +225,3 @@ slides:
   row2: [bias_threshold5, bias_threshold10]
 
 
-# ======================================= graphics slides  =============================================
-graphics slides:
-- type: same valid time
-  title: Composite Reflectivity
-  graphics name: cref_full_sfc_f006.png
-  cycle: 2024050700
-  number of rows: 2
-  row1: [obs, RRFSv2_conus_3km_ret_v2x_retv4]
-  row2: 
-
-- type: same cycle
-  title: Composite Reflectivity
-  experiment name: RRFSv2_conus_3km_ret_v2x_retv4
-  cycle: 2024050700
-  number of rows: 2
-  row1: [obs, cref_full_sfc_f001.pg]
-  row2: [obs, cref_full_sfc_f002.pg]

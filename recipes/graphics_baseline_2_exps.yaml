@@ -1,0 +1,17 @@
+# ======================================= graphics slides  =============================================
+graphics slides:
+- type: same valid time
+  title: Composite Reflectivity
+  graphics name: cref_full_sfc_f006.png
+  cycle: 2024050700
+  number of rows: 2
+  row1: [obs, first]
+  row2: [second]
+
+- type: same cycle
+  title: Composite Reflectivity
+  experiment name: RRFSv2_conus_3km_ret_v2x_retv4
+  cycle: 2024050700
+  number of rows: 2
+  row1: [obs, cref_full_sfc_f001.pg]
+  row2: [obs, cref_full_sfc_f002.pg]

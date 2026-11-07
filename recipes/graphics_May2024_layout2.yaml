@@ -1,16 +1,22 @@
-# ======================================= graphics slides  =============================================
+#  graphic layout for May2024 baseline retros
+#  layout: 1 obs + 2 exps
+
 graphics slides:
 - type: same valid time
   title: Composite Reflectivity
+  prefix: rrfs
+  WGF: det
   graphics name: cref_full_sfc_f006.png
   cycle: 2024050700
   number of rows: 2
-  row1: [obs, first]
-  row2: [second]
+  row1: [obs]
+  row2: [first, second]
 
 - type: same cycle
   title: Composite Reflectivity
-  experiment name: RRFSv2_conus_3km_ret_v2x_retv4
+  prefix: rrfs
+  WGF: det
+  experiment: second
   cycle: 2024050700
   number of rows: 2
   row1: [obs, cref_full_sfc_f001.pg]

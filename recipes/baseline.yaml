@@ -12,10 +12,10 @@
 experiments:
 - name: RRFSv2_conus_3km_ret_v2x_retv4
   color: red
-  #COMROOT: /gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
+  COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
 - name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
   color: blue
-  #COMROOT: /gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
+  COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
 - name: HRRR_OPS
   color: orange
 #- name: RRFS_A
@@ -23,7 +23,7 @@ experiments:
 
 pygraf graphics slides:
   enable: true
-  #recipe: mygraphics.yaml  # for specifying a special graphics recipe
+  recipe: graphics_May2024_layout2.yaml
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # detailed recipes

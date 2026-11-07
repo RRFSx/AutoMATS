@@ -8,7 +8,7 @@ Steps:
   2. Checks if local port forward (localhost:<my_local_port>) is ALREADY active:
      - If ACTIVE: Confirms tunnel readiness for SCP transfers and exits immediately (0.1s).
   3. If INACTIVE (tunnel not running):
-     - Uses recorded ports from hpc.config (or discovers assigned remote port on first run).
+     - Uses recorded ports from .hpc_config (or discovers assigned remote port on first run).
      - Prompts user to log in once to establish the master tunnel (push USB key, then exit).
      - Verifies tunnel is listening on localhost:<my_local_port> and exits with ready status.
 """
@@ -84,14 +84,14 @@ SSH_CONFIG_BLOCK = """Host *  !*github.com
 
 
 def get_default_config_path() -> Path:
-    """Finds hpc.config path in CWD or AutoMATS root directory."""
-    cwd_cfg = Path.cwd() / "hpc.config"
+    """Finds .hpc_config path in CWD or AutoMATS root directory."""
+    cwd_cfg = Path.cwd() / ".hpc_config"
     if cwd_cfg.exists():
         return cwd_cfg
 
     script_dir = Path(__file__).resolve().parent
     automats_root = script_dir.parent if script_dir.name == "ush" else script_dir
-    automats_cfg = automats_root / "hpc.config"
+    automats_cfg = automats_root / ".hpc_config"
     if automats_cfg.exists():
         return automats_cfg
 
@@ -228,7 +228,7 @@ def resolve_username(
     """
     Resolves username strictly for the target HPC cluster:
       1. Explicit CLI argument.
-      2. Target cluster's own entry in hpc.config.
+      2. Target cluster's own entry in .hpc_config.
       3. Existing ControlMaster socket for the target cluster (master-%r@{host}:*).
       4. Interactive prompt fallback.
     """
@@ -236,7 +236,7 @@ def resolve_username(
     if requested_username and requested_username != "<your_username>":
         return requested_username
 
-    # 2. Target cluster's own entry in hpc.config
+    # 2. Target cluster's own entry in .hpc_config
     if config:
         cluster_user = config.get(hpc.lower(), {}).get("username")
         if cluster_user and cluster_user != "<your_username>":
@@ -333,7 +333,7 @@ def detect_remote_port(
 # ==============================================================================
 
 def load_hpc_config(path: Path) -> Dict[str, Dict[str, Any]]:
-    """Loads hpc.config without external dependencies."""
+    """Loads .hpc_config without external dependencies."""
     if not path.exists():
         return {}
     cfg: Dict[str, Dict[str, Any]] = {}
@@ -360,7 +360,7 @@ def load_hpc_config(path: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def save_hpc_config(path: Path, data: Dict[str, Dict[str, Any]]) -> None:
-    """Saves dictionary to hpc.config without external dependencies."""
+    """Saves dictionary to .hpc_config without external dependencies."""
     lines = []
     for cluster, entry in data.items():
         lines.append(f"{cluster}:")
@@ -376,7 +376,7 @@ def create_template_hpc_config(
     username: Optional[str] = None,
     target_cluster: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Creates a template hpc.config only for the target cluster being accessed."""
+    """Creates a template .hpc_config only for the target cluster being accessed."""
     print(f"[*] Configuration file '{path.name}' not found.")
     user = username
     if not user:
@@ -403,7 +403,7 @@ def create_template_hpc_config(
     save_hpc_config(path, template_data)
     print(f"[+] Created configuration file '{path.name}'.\n")
 
-    # Ensure hpc.config is not tracked by git
+    # Ensure config file is not tracked by git
     gitignore_path = path.parent / ".gitignore"
     if gitignore_path.exists():
         try:
@@ -422,7 +422,7 @@ def sync_missing_ports_in_config(
     username: Optional[str] = None,
     target_cluster: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Auto-detects and fills in any null ports for clusters in hpc.config."""
+    """Auto-detects and fills in any null ports for clusters in .hpc_config."""
     if not path.exists():
         return {}
     cfg = load_hpc_config(path)
@@ -459,7 +459,7 @@ def update_hpc_config(
     my_local_port: int,
     remote_local_port: int,
 ) -> None:
-    """Update or insert a specific HPC section in hpc.config only when missing or changed."""
+    """Update or insert a specific HPC section in .hpc_config only when missing or changed."""
     cfg = load_hpc_config(path)
     current = cfg.get(hpc.lower(), {})
     if (
@@ -1069,7 +1069,7 @@ def establish_tunnel(
     if not my_local_port:
         my_local_port = compute_local_port(hpc, remote_local_port)
 
-    # Save automatically detected/verified ports into hpc.config
+    # Save automatically detected/verified ports into .hpc_config
     update_hpc_config(
         path=config_path,
         hpc=hpc,
@@ -1155,7 +1155,7 @@ def ensure_tunnel(
     if not user or user == "<your_username>":
         raise ValueError(
             f"Username not configured in '{cfg_file.name}' for '{hpc}'. "
-            "Please configure username in hpc.config first."
+            f"Please configure username in '{cfg_file.name}' first."
         )
 
     if hpc_key not in cfg_all:
@@ -1263,7 +1263,7 @@ def parse_args() -> argparse.Namespace:
         "--config-file",
         type=Path,
         default=None,
-        help="Path to hpc.config file (default: searches CWD and AutoMATS root)",
+        help="Path to .hpc_config file (default: searches CWD and AutoMATS root)",
     )
 
     return parser.parse_args()
@@ -1300,7 +1300,7 @@ def main() -> int:
 
     config_path = args.config_file or get_default_config_path()
 
-    # If hpc.config does not exist, create template only for requested cluster
+    # If .hpc_config does not exist, create template only for requested cluster
     if not config_path.exists():
         create_template_hpc_config(config_path, username, target_cluster=hpc)
         if not hpc:
@@ -1321,7 +1321,7 @@ def main() -> int:
         print(f"Please specify your username as an argument or in {config_path.name}.", file=sys.stderr)
         return 1
 
-    # If this cluster is not yet in hpc.config, initialize it incrementally with auto-detected ports!
+    # If this cluster is not yet in .hpc_config, initialize it incrementally with auto-detected ports!
     if hpc not in existing_all:
         det_rem = detect_remote_port(hpc, username)
         det_loc = compute_local_port(hpc, det_rem) if det_rem else None
@@ -1332,7 +1332,7 @@ def main() -> int:
     # Step 1: Ensure ~/.ssh/config contains ControlMaster configuration
     ensure_ssh_config()
 
-    # Step 2: Handle known ports from hpc.config or CLI override
+    # Step 2: Handle known ports from .hpc_config or CLI override
     remote_local_port: Optional[int] = args.remote_port or existing_cfg.get("remote_local_port")
     my_local_port: Optional[int] = args.local_port or existing_cfg.get("my_local_port")
     if not remote_local_port:

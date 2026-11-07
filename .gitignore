@@ -10,4 +10,4 @@ figures/
 results
 tmp/
 .DS_Store
-hpc.config
+.hpc_config

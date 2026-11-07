@@ -105,7 +105,7 @@ def usage(error_msg=None):
         "  --output-dir DIR   Output directory (default: results/rt_rrfsv2_<tag>)\n"
         "  --plan             List planned figures without running browser\n"
         "  --metadata-only    Refresh metadata on cached figures locally\n"
-        "  --slides-only      Build PowerPoint deck from existing PNGs\n"
+        "  --slides-only, --slide-only  Build PowerPoint deck from existing PNGs\n"
         "  --update           Regenerate figures even if they already exist in output directory\n"
         "  --limit N          Generate at most N figures\n"
         "  --show-browser     Run Chrome visibly instead of headless background\n"

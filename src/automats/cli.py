@@ -106,7 +106,8 @@ def main(argv=None) -> int:
     parser.add_argument("--plan", action="store_true", help="List filenames without opening a browser or contacting MATS")
     local_mode = parser.add_mutually_exclusive_group()
     local_mode.add_argument("--metadata-only", action="store_true", help="Add metadata to older cached figures locally; never contact MATS")
-    local_mode.add_argument("--slides-only", action="store_true", help="Build slides from existing PNG figures; never contact MATS")
+    local_mode.add_argument("--slides-only", "--slide-only", dest="slides_only", action="store_true",
+                            help="Build slides from existing PNG figures; never contact MATS")
     parser.add_argument("--update", action="store_true",
                         help="Regenerate all figures even if they already exist in the output directory")
     parser.add_argument("--limit", type=int, help="Generate at most this many figures")

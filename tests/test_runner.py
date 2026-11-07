@@ -1897,13 +1897,15 @@ class SlideTests(unittest.TestCase):
         self.assertIn("1 slides: custom figures/slides.pptx", output.getvalue())
 
     def test_slides_only_requires_configuration_and_rejects_limit(self):
-        with patch("automats.cli.load_plan", return_value=replace(self.plan, slides=())), \
-            patch("automats.cli.run_plan") as execute, redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            self.assertEqual(main(["recipe.yaml", "--slides-only"]), 1)
-        execute.assert_not_called()
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as result:
-            main(["recipe.yaml", "--slides-only", "--limit", "1"])
-        self.assertEqual(result.exception.code, 2)
+        for flag in ("--slides-only", "--slide-only"):
+            with self.subTest(flag=flag):
+                with patch("automats.cli.load_plan", return_value=replace(self.plan, slides=())), \
+                    patch("automats.cli.run_plan") as execute, redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                    self.assertEqual(main(["recipe.yaml", flag]), 1)
+                execute.assert_not_called()
+                with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as result:
+                    main(["recipe.yaml", flag, "--limit", "1"])
+                self.assertEqual(result.exception.code, 2)
 
     def test_invalid_slide_references_only_stop_slide_generation(self):
         plan = replace(self.plan, slides=(), slide_error="slide 1: ambiguous figure 'T'")
@@ -1999,7 +2001,7 @@ class CliTests(unittest.TestCase):
             self.assertTrue(execute.call_args.kwargs["update"])
 
     def test_update_rejects_slides_only_and_metadata_only(self):
-        for flag in ("--slides-only", "--metadata-only"):
+        for flag in ("--slides-only", "--slide-only", "--metadata-only"):
             with self.subTest(flag=flag), redirect_stderr(StringIO()), self.assertRaises(SystemExit) as result:
                 main([str(self.recipe), "--update", flag])
             self.assertEqual(result.exception.code, 2)

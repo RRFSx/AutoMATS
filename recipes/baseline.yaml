@@ -30,7 +30,6 @@ common:
   #end: "2024-05-13T00:00:00Z"
   line weight: 3
   marker weight: 8
-  #local port: 40896  # HPC forwording port for transfering files
 
 automation:
   inter-plot waiting seconds: 3 

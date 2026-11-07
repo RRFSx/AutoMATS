@@ -98,54 +98,135 @@ def test_local_access(username: str, local_port: int, timeout: float = 2.5) -> b
         return False
 
 
+def _parse_yaml_scalar(v: str) -> Any:
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        inner = v[1:-1].strip()
+        return [x.strip().strip("'\"") for x in inner.split(",") if x.strip()] if inner else []
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        return v[1:-1]
+    if v.isdigit():
+        return int(v)
+    return v
+
+
+def parse_simple_yaml(text: str) -> Dict[str, Any]:
+    """Pure-Python indentation-aware YAML parser for recipes without requiring PyYAML."""
+    raw_lines: List[Tuple[int, str]] = []
+    for raw in text.splitlines():
+        line = raw
+        if "#" in line:
+            line = line.split("#", 1)[0]
+        if line.strip():
+            indent = len(line) - len(line.lstrip(" "))
+            raw_lines.append((indent, line.strip()))
+
+    idx = 0
+
+    def parse_node(base_indent: int) -> Any:
+        nonlocal idx
+        if idx >= len(raw_lines):
+            return None
+        indent, line = raw_lines[idx]
+        if line.startswith("- "):
+            res_list: List[Any] = []
+            list_indent = indent
+            while idx < len(raw_lines):
+                cur_indent, cur_line = raw_lines[idx]
+                if cur_indent < list_indent:
+                    break
+                if cur_line.startswith("- "):
+                    content = cur_line[2:].strip()
+                    idx += 1
+                    if ":" in content and not content.endswith("]"):
+                        k, v = content.split(":", 1)
+                        k = k.strip().strip("'\"")
+                        v = v.strip()
+                        item_dict: Dict[str, Any] = {}
+                        if v:
+                            item_dict[k] = _parse_yaml_scalar(v)
+                        else:
+                            if idx < len(raw_lines) and raw_lines[idx][0] > cur_indent:
+                                item_dict[k] = parse_node(raw_lines[idx][0])
+                            else:
+                                item_dict[k] = None
+                        while idx < len(raw_lines):
+                            ni, nl = raw_lines[idx]
+                            if ni <= cur_indent or nl.startswith("- "):
+                                break
+                            if ":" in nl:
+                                nk, nv = nl.split(":", 1)
+                                nk = nk.strip().strip("'\"")
+                                nv = nv.strip()
+                                idx += 1
+                                if nv:
+                                    item_dict[nk] = _parse_yaml_scalar(nv)
+                                else:
+                                    if idx < len(raw_lines) and raw_lines[idx][0] > ni:
+                                        item_dict[nk] = parse_node(raw_lines[idx][0])
+                                    else:
+                                        item_dict[nk] = None
+                            else:
+                                idx += 1
+                        res_list.append(item_dict)
+                    else:
+                        val = _parse_yaml_scalar(content)
+                        if idx < len(raw_lines) and raw_lines[idx][0] > cur_indent and not raw_lines[idx][1].startswith("- "):
+                            sub_block = parse_node(raw_lines[idx][0])
+                            if isinstance(val, str) and isinstance(sub_block, dict):
+                                res_list.append({val: sub_block})
+                            else:
+                                res_list.append(val)
+                        else:
+                            res_list.append(val)
+                else:
+                    break
+            return res_list
+        else:
+            res_dict: Dict[str, Any] = {}
+            dict_indent = indent
+            while idx < len(raw_lines):
+                cur_indent, cur_line = raw_lines[idx]
+                if cur_indent < dict_indent:
+                    break
+                if cur_line.startswith("- "):
+                    break
+                if ":" in cur_line:
+                    k, v = cur_line.split(":", 1)
+                    k = k.strip().strip("'\"")
+                    v = v.strip()
+                    idx += 1
+                    if v:
+                        res_dict[k] = _parse_yaml_scalar(v)
+                    else:
+                        if idx < len(raw_lines) and (
+                            raw_lines[idx][0] > cur_indent
+                            or (raw_lines[idx][1].startswith("- ") and raw_lines[idx][0] >= cur_indent)
+                        ):
+                            res_dict[k] = parse_node(raw_lines[idx][0])
+                        else:
+                            res_dict[k] = None
+                else:
+                    idx += 1
+            return res_dict
+
+    parsed = parse_node(0)
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def load_recipe_yaml(path: Path) -> Dict[str, Any]:
-    """Loads recipe YAML file using PyYAML or a fallback parser."""
+    """Loads recipe YAML file using PyYAML or our pure-Python fallback parser."""
     try:
         import yaml
         with path.open(encoding="utf-8") as f:
             data = yaml.safe_load(f)
-            return data if isinstance(data, dict) else {}
+            if isinstance(data, dict):
+                return data
     except ImportError:
         pass
 
-    # Simple fallback parser for basic key-value / lists / mappings
     raw = path.read_text(encoding="utf-8")
-    data: Dict[str, Any] = {}
-    current_list_key = None
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "#" in line:
-            line = line.split("#", 1)[0].strip()
-        if line.startswith("- ") and current_list_key:
-            item_text = line[2:].strip()
-            if ":" in item_text:
-                sub_k, sub_v = item_text.split(":", 1)
-                sub_k = sub_k.strip().strip("'\"")
-                sub_v = sub_v.strip()
-                if sub_v.startswith("[") and sub_v.endswith("]"):
-                    inner = sub_v[1:-1].strip()
-                    sub_v = [x.strip() for x in inner.split(",") if x.strip()] if inner else []
-                data[current_list_key].append({sub_k: sub_v})
-            else:
-                data[current_list_key].append(item_text)
-        elif ":" in line:
-            k, v = line.split(":", 1)
-            k = k.strip()
-            v = v.strip()
-            if not v:
-                data[k] = []
-                current_list_key = k
-            elif v.startswith("[") and v.endswith("]"):
-                inner = v[1:-1].strip()
-                items = [x.strip() for x in inner.split(",") if x.strip()] if inner else []
-                data[k] = items
-                current_list_key = None
-            else:
-                data[k] = v
-                current_list_key = None
-    return data
+    return parse_simple_yaml(raw)
 
 
 def extract_expname(remote_path: str) -> str:
@@ -163,6 +244,62 @@ def extract_expname(remote_path: str) -> str:
         if idx > 0:
             return parts[idx - 1]
     return parts[-1]
+
+
+def detect_prefix_from_path(comroot: str) -> str:
+    """
+    Extracts the model prefix from a COMROOT path.
+    E.g. /gpfs/f6/.../com/rrfs/v2.1.4 -> rrfs
+         /com/hrrr/v4.1 -> hrrr
+         /scratch1/.../com/rap/v5.0 -> rap
+    """
+    clean = comroot.rstrip("/")
+    m = re.search(r"/com/([^/]+)(?:/|$)", clean)
+    if m:
+        return m.group(1)
+    parts = clean.split("/")
+    if "com" in parts:
+        idx = parts.index("com")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return ""
+
+
+def detect_prefix(remote_comroot: str, username: str = "", port: int = 0) -> str:
+    """
+    Detects model prefix under COMROOT.
+    1. First tries extracting from the path directly: .../com/<prefix>/... -> <prefix>
+    2. If not found in path and port is available, queries remote COMROOT for <prefix>.YYYYMMDD directories.
+    3. Falls back to 'rrfs' as default.
+    """
+    p = detect_prefix_from_path(remote_comroot)
+    if p:
+        return p
+
+    if username and port:
+        try:
+            cmd = [
+                "ssh",
+                "-p", str(port),
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=3",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "LogLevel=ERROR",
+                f"{username}@localhost",
+                f"ls -d {remote_comroot.rstrip('/')}/*.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null | head -n1",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0)
+            if res.returncode == 0 and res.stdout.strip():
+                dir_name = Path(res.stdout.strip()).name
+                if "." in dir_name:
+                    cand = dir_name.split(".")[0].strip()
+                    if cand:
+                        return cand
+        except Exception:
+            pass
+
+    return "rrfs"
 
 
 def parse_fhr_list(raw_fhr: Any) -> List[int]:
@@ -522,10 +659,11 @@ def stream_tar_pull(
     return completed, missing, errors
 
 
-def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str, str, int, str, List[Tuple[str, Path]]]:
+def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str, str, int, str, str, List[Tuple[str, Path]]]:
     """
     Builds the list of (remote_path, local_path) tuples from recipe configuration.
-    Returns (hpc_cluster, username, port, expname, tasks).
+    Supports top-level 'cycle' and 'fhr' defaults and per-graphic Style B overrides.
+    Returns (hpc_cluster, username, port, expname, prefix, tasks).
     """
     comroot_raw = str(recipe.get("COMROOT", "")).strip()
     if not comroot_raw:
@@ -539,56 +677,108 @@ def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str,
         hpc_cluster = "localhost"
         remote_comroot = comroot_raw
 
-    expname = extract_expname(remote_comroot)
-    prefix = str(recipe.get("prefix", "rrfs")).strip()
-
-    # WGF list
-    raw_wgf = recipe.get("WGF", ["det"])
-    wgf_list = raw_wgf if isinstance(raw_wgf, list) else [raw_wgf]
-    wgf_list = [str(x).strip() for x in wgf_list if str(x).strip()]
-
-    # Tile list
-    raw_tile = recipe.get("tile", ["full"])
-    tile_list = raw_tile if isinstance(raw_tile, list) else [raw_tile]
-    tile_list = [str(x).strip() for x in tile_list if str(x).strip()]
-
-    # Cycles and Fhrs
-    cycles = parse_cycle_list(recipe.get("cycle", []))
-    fhr_cfg = parse_fhr_config(recipe.get("fhr", [0]))
-
-    # Templates
-    templates = (
-        recipe.get("graphics name template")
-        or recipe.get("graphics_name_template")
-        or []
-    )
-    if isinstance(templates, str):
-        templates = [templates]
-    templates = [str(t).strip() for t in templates if str(t).strip()]
-    if not templates:
-        raise ValueError("No 'graphics name template' specified in recipe.")
-
     # Check HPC config & connection info
     hpc_configs = load_hpc_config()
     c_info = hpc_configs.get(hpc_cluster, {})
     username = c_info.get("username", "")
     port = c_info.get("my_local_port", 0)
 
+    expname = extract_expname(remote_comroot)
+
+    # Prefix: use explicit if specified, otherwise auto-detect from COMROOT
+    raw_prefix = recipe.get("prefix")
+    if raw_prefix:
+        prefix = str(raw_prefix).strip()
+    else:
+        prefix = detect_prefix(remote_comroot, username, port)
+
+    # Default WGF list
+    raw_wgf = recipe.get("WGF", ["det"])
+    default_wgf_list = raw_wgf if isinstance(raw_wgf, list) else [raw_wgf]
+    default_wgf_list = [str(x).strip() for x in default_wgf_list if str(x).strip()]
+
+    # Default tile list
+    raw_tile = recipe.get("tile", ["full"])
+    default_tile_list = raw_tile if isinstance(raw_tile, list) else [raw_tile]
+    default_tile_list = [str(x).strip() for x in default_tile_list if str(x).strip()]
+
+    # Default cycles and fhr from top-level "cycle:" and "fhr:"
+    default_cycle_raw = recipe.get("cycle")
+    if default_cycle_raw is None:
+        def_cf = recipe.get("cycle and fhr") or recipe.get("cycle_and_fhr") or {}
+        if isinstance(def_cf, dict):
+            default_cycle_raw = def_cf.get("cycle")
+
+    default_fhr_raw = recipe.get("fhr")
+    if default_fhr_raw is None:
+        def_cf = recipe.get("cycle and fhr") or recipe.get("cycle_and_fhr") or {}
+        if isinstance(def_cf, dict):
+            default_fhr_raw = def_cf.get("fhr")
+    if default_fhr_raw is None:
+        default_fhr_raw = [0]
+
+    default_cycles = parse_cycle_list(default_cycle_raw) if default_cycle_raw else []
+    default_fhr_cfg = parse_fhr_config(default_fhr_raw)
+
+    # Graphics list from "graphics list" or legacy "graphics name template"
+    raw_graphics = (
+        recipe.get("graphics list")
+        or recipe.get("graphics_list")
+        or recipe.get("graphics name template")
+        or recipe.get("graphics_name_template")
+        or []
+    )
+    if isinstance(raw_graphics, str):
+        raw_graphics = [raw_graphics]
+    if not raw_graphics:
+        raise ValueError("No 'graphics list' specified in recipe.")
+
     tasks: List[Tuple[str, Path]] = []
     clean_comroot = remote_comroot.rstrip("/")
 
-    for cyc_str in cycles:
-        pdy = cyc_str[:8]
-        cyc = cyc_str[8:10]
-        fhrs = resolve_fhrs_for_cycle(fhr_cfg, cyc_str)
-        for wgf in wgf_list:
-            for tile in tile_list:
-                for fhr in fhrs:
-                    valid_time = f"{pdy}{cyc}{fhr:02d}"
-                    fhr_3d = f"{fhr:03d}"
-                    for tmpl in templates:
-                        # Normalize .pg to .png
-                        t_norm = re.sub(r"\.pg$", ".png", tmpl, flags=re.IGNORECASE)
+    for item in raw_graphics:
+        item_template = None
+        item_cycles = default_cycles
+        item_fhr_cfg = default_fhr_cfg
+        item_wgf_list = default_wgf_list
+        item_tile_list = default_tile_list
+
+        if isinstance(item, str):
+            item_template = item.strip()
+        elif isinstance(item, dict):
+            # Style B: dictionary where key is the template name and value is the override dictionary
+            for k, v in item.items():
+                item_template = str(k).strip()
+                if isinstance(v, dict):
+                    if "cycle" in v:
+                        item_cycles = parse_cycle_list(v["cycle"])
+                    if "fhr" in v:
+                        item_fhr_cfg = parse_fhr_config(v["fhr"])
+                    if "WGF" in v or "wgf" in v:
+                        w_val = v.get("WGF") or v.get("wgf")
+                        w_list = w_val if isinstance(w_val, list) else [w_val]
+                        item_wgf_list = [str(x).strip() for x in w_list if str(x).strip()]
+                    if "tile" in v:
+                        t_val = v["tile"]
+                        t_list = t_val if isinstance(t_val, list) else [t_val]
+                        item_tile_list = [str(x).strip() for x in t_list if str(x).strip()]
+                break
+
+        if not item_template:
+            continue
+
+        # Normalize .pg to .png
+        t_norm = re.sub(r"\.pg$", ".png", item_template, flags=re.IGNORECASE)
+
+        for cyc_str in item_cycles:
+            pdy = cyc_str[:8]
+            cyc = cyc_str[8:10]
+            fhrs = resolve_fhrs_for_cycle(item_fhr_cfg, cyc_str)
+            for wgf in item_wgf_list:
+                for tile in item_tile_list:
+                    for fhr in fhrs:
+                        valid_time = f"{pdy}{cyc}{fhr:02d}"
+                        fhr_3d = f"{fhr:03d}"
                         fname = (
                             t_norm.replace("{tile}", tile)
                             .replace("{TILE}", tile)
@@ -601,7 +791,7 @@ def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str,
                         local_path = output_base / expname / wgf / tile / cyc_str / fname
                         tasks.append((rem_path, local_path))
 
-    return hpc_cluster, username, port, expname, tasks
+    return hpc_cluster, username, port, expname, prefix, tasks
 
 
 def parse_args() -> argparse.Namespace:
@@ -657,7 +847,7 @@ def main() -> int:
         return 1
 
     try:
-        cluster, username, port, expname, tasks = build_download_list(recipe, args.output_dir)
+        cluster, username, port, expname, prefix, tasks = build_download_list(recipe, args.output_dir)
     except Exception as e:
         print(f"Error parsing recipe: {e}", file=sys.stderr)
         return 1
@@ -665,6 +855,7 @@ def main() -> int:
     print("=" * 70)
     print(f"[*] PYGRAF GRAPHICS DOWNLOAD: {expname}")
     print(f"[*] Cluster:       {cluster}")
+    print(f"[*] Prefix:        {prefix}")
     print(f"[*] Recipe:        {recipe_path.name}")
     print(f"[*] Local Target:  {args.output_dir / expname}")
     print(f"[*] Total Targets: {len(tasks)} files")
@@ -673,8 +864,12 @@ def main() -> int:
     print("=" * 70)
 
     if args.debug:
-        fhr_cfg = parse_fhr_config(recipe.get("fhr", [0]))
-        print("\n[DEBUG] Forecast lead hours (fhr) breakdown:")
+        raw_fhr = recipe.get("fhr")
+        if raw_fhr is None:
+            def_cf = recipe.get("cycle and fhr") or {}
+            raw_fhr = def_cf.get("fhr") if isinstance(def_cf, dict) else [0]
+        fhr_cfg = parse_fhr_config(raw_fhr)
+        print("\n[DEBUG] Default forecast lead hours (fhr) breakdown:")
         if fhr_cfg.get("legacy") is not None:
             print(f"  - All cycles: {len(fhr_cfg['legacy'])} leads: {fhr_cfg['legacy']}")
         else:

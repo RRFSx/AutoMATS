@@ -10,10 +10,13 @@ sys.path.insert(0, str(ROOT / "ush"))
 from download_pgraf_graphics import (
     build_download_list,
     cleanup_empty_directories,
+    detect_prefix,
+    detect_prefix_from_path,
     extract_expname,
     parse_cycle_list,
     parse_fhr_config,
     parse_fhr_list,
+    parse_simple_yaml,
     resolve_fhrs_for_cycle,
     stream_tar_pull,
 )
@@ -72,10 +75,11 @@ class DownloadGraphicsTests(unittest.TestCase):
             "graphics name template": ["cref_{tile}_sfc_f{fhr}.png"],
         }
         out_base = Path("/local/figures")
-        cluster, user, port, expname, tasks = build_download_list(recipe, out_base)
+        cluster, user, port, expname, prefix, tasks = build_download_list(recipe, out_base)
 
         self.assertEqual(cluster, "gaeac6")
         self.assertEqual(expname, "RRFSv2X.retv4")
+        self.assertEqual(prefix, "rrfs")
         # 2 cycles (00, 01) * 1 WGF * 1 tile * 2 fhrs (0, 1) * 1 template = 4 tasks
         self.assertEqual(len(tasks), 4)
 
@@ -134,7 +138,7 @@ class DownloadGraphicsTests(unittest.TestCase):
             "graphics name template": ["cref_{tile}_sfc_f{fhr}.png"],
         }
         out_base = Path("/local/figures")
-        cluster, user, port, expname, tasks = build_download_list(recipe, out_base)
+        cluster, user, port, expname, prefix, tasks = build_download_list(recipe, out_base)
 
         # 2024050610 has 2 fhrs (0, 1) -> 2 tasks
         # 2024050700 has 3 fhrs (0, 1, 2) -> 3 tasks
@@ -245,6 +249,101 @@ class DownloadGraphicsTests(unittest.TestCase):
     def test_stream_tar_pull_empty_tasks(self):
         completed, missing, errors = stream_tar_pull("user", 1234, [])
         self.assertEqual((completed, missing, errors), (0, 0, 0))
+
+    def test_parse_simple_yaml_nested(self):
+        raw = """
+COMROOT: gaeac6:/gpfs/f6/model/com/rrfs/v1
+prefix: rrfs
+WGF: [det]
+cycle: [2024050600-2024050602]
+fhr:
+- default: [0, 1]
+- '00,12': [0-6]
+tile: [full]
+graphics list:
+- cref_{tile}_sfc_f{fhr}.png
+- temp_{tile}_2m_f{fhr}.png:
+    cycle: [2024050612]
+    fhr: [0-3]
+"""
+        d = parse_simple_yaml(raw)
+        self.assertEqual(d["COMROOT"], "gaeac6:/gpfs/f6/model/com/rrfs/v1")
+        self.assertEqual(d["prefix"], "rrfs")
+        self.assertEqual(d["WGF"], ["det"])
+        self.assertEqual(d["tile"], ["full"])
+        self.assertEqual(d["cycle"], ["2024050600-2024050602"])
+        self.assertEqual(len(d["graphics list"]), 2)
+        self.assertEqual(d["graphics list"][0], "cref_{tile}_sfc_f{fhr}.png")
+        self.assertIn("temp_{tile}_2m_f{fhr}.png", d["graphics list"][1])
+        self.assertEqual(d["graphics list"][1]["temp_{tile}_2m_f{fhr}.png"]["cycle"], ["2024050612"])
+
+    def test_build_download_list_with_per_graphic_overrides(self):
+        recipe = {
+            "COMROOT": "gaeac6:/gpfs/f6/OPSROOT/exp/com/rrfs/v1",
+            "prefix": "rrfs",
+            "WGF": ["det"],
+            "tile": ["full"],
+            "cycle": ["2024050600"],
+            "fhr": [0, 1],
+            "graphics list": [
+                "cref_{tile}_sfc_f{fhr}.png",
+                {
+                    "temp_{tile}_2m_f{fhr}.png": {
+                        "cycle": ["2024050612"],
+                        "fhr": [0, 1, 2],
+                    },
+                },
+            ],
+        }
+        out_base = Path("/local/figures")
+        cluster, user, port, expname, prefix, tasks = build_download_list(recipe, out_base)
+
+        # First graphic uses default cycle 2024050600 with fhr 0, 1 -> 2 tasks
+        cref_tasks = [t for t in tasks if "cref_" in str(t[1])]
+        self.assertEqual(len(cref_tasks), 2)
+        self.assertIn("2024050600", str(cref_tasks[0][1]))
+        self.assertIn("2024050600", str(cref_tasks[1][1]))
+
+        # Second graphic uses custom cycle 2024050612 with fhr 0, 1, 2 -> 3 tasks
+        temp_tasks = [t for t in tasks if "temp_" in str(t[1])]
+        self.assertEqual(len(temp_tasks), 3)
+        self.assertIn("2024050612", str(temp_tasks[0][1]))
+        self.assertIn("2024050612", str(temp_tasks[1][1]))
+        self.assertIn("2024050612", str(temp_tasks[2][1]))
+
+    def test_detect_prefix_from_path(self):
+        self.assertEqual(
+            detect_prefix_from_path("gaeac6:/gpfs/f6/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4"),
+            "rrfs",
+        )
+        self.assertEqual(
+            detect_prefix_from_path("/gpfs/hps/nco/ops/com/hrrr/v4.1"),
+            "hrrr",
+        )
+        self.assertEqual(
+            detect_prefix_from_path("/scratch1/NCEPDEV/stmp2/user/com/rap/v5.0"),
+            "rap",
+        )
+        self.assertEqual(
+            detect_prefix_from_path("/path/to/custom/archive"),
+            "",
+        )
+
+    def test_build_download_list_auto_detects_prefix(self):
+        recipe_no_prefix = {
+            "COMROOT": "gaeac6:/gpfs/f6/OPSROOT/RRFSv2X.retv4/com/hrrr/v4.1",
+            # 'prefix' is omitted intentionally
+            "WGF": ["det"],
+            "tile": ["full"],
+            "cycle": ["2024050600"],
+            "fhr": [0],
+            "graphics list": ["cref_{tile}_sfc_f{fhr}.png"],
+        }
+        out_base = Path("/local/figures")
+        cluster, user, port, expname, prefix, tasks = build_download_list(recipe_no_prefix, out_base)
+        self.assertEqual(prefix, "hrrr")
+        # Check task remote path contains auto-detected prefix 'hrrr.20240506'
+        self.assertIn("hrrr.20240506", tasks[0][0])
 
 
 if __name__ == "__main__":

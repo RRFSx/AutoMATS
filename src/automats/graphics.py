@@ -12,6 +12,7 @@ Handles:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from io import BytesIO
 import os
 from pathlib import Path
@@ -23,6 +24,8 @@ import tarfile
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+
+from automats.mrms import format_mrms_filename, is_valid_mrms_file
 
 try:
     import yaml
@@ -151,6 +154,61 @@ def compute_valid_time(cycle: str | int, fhr: int) -> Tuple[str, str, str]:
     cyc = c_str[8:10]
     valid_time_dir = f"{pdy}{cyc}{fhr:02d}"
     return pdy, cyc, valid_time_dir
+
+
+def resolve_obs_cell_time(
+    spec: Dict[str, Any],
+    row_items: List[Any],
+    item_str: str,
+) -> Tuple[str, datetime]:
+    """
+    Resolves observation variable (e.g. 'cref') and valid datetime for an 'obs' cell.
+    - 'same valid time': takes fhr and variable from 'graphics name' (e.g. cref_full_sfc_f006.png).
+    - 'same cycle': extracts companion forecast fhr and variable from the same row.
+    Supports explicit item specifiers like 'obs_f06', 'obs_cref_f06', or 'obs_202405070600'.
+    """
+    cycle_val = spec.get("cycle")
+    c_str = str(cycle_val).strip() if cycle_val else ""
+    try:
+        cycle_dt = datetime.strptime(c_str[:10], "%Y%m%d%H") if len(c_str) >= 10 else datetime.now()
+    except ValueError:
+        cycle_dt = datetime.now()
+
+    var = "cref"
+    slide_type = str(spec.get("type", "same valid time")).strip().lower().replace("_", " ")
+
+    # Check for explicit timestamp: obs_202405070600 or obs_cref_202405070600
+    m_ts = re.search(r"obs(?:_([A-Za-z0-9_-]+))?[_-](\d{10}|\d{12})$", item_str, re.IGNORECASE)
+    if m_ts:
+        if m_ts.group(1):
+            var = m_ts.group(1).lower()
+        ts = m_ts.group(2)
+        fmt = "%Y%m%d%H%M" if len(ts) == 12 else "%Y%m%d%H"
+        try:
+            return var, datetime.strptime(ts, fmt)
+        except ValueError:
+            pass
+
+    if "valid" in slide_type:
+        g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
+        clean_name, tile, fhr = parse_graphics_name(g_name)
+        if "_" in clean_name:
+            var = clean_name.split("_")[0].lower()
+        return var, cycle_dt + timedelta(hours=fhr)
+    else:
+        # 'same cycle': find companion forecast item in row_items
+        fhr = 0
+        for other in row_items:
+            other_str = str(other).strip()
+            if other_str.lower().startswith("obs"):
+                continue
+            if re.search(r"_f\d+", other_str, re.IGNORECASE) or other_str.lower().endswith((".png", ".pg")):
+                clean_name, tile, item_fhr = parse_graphics_name(other_str)
+                fhr = item_fhr
+                if "_" in clean_name:
+                    var = clean_name.split("_")[0].lower()
+                break
+        return var, cycle_dt + timedelta(hours=fhr)
 
 
 def detect_prefix_from_path(comroot: str) -> str:
@@ -595,6 +653,7 @@ def process_graphics_slides(
 
     # 3. Phase 1: Collect and batch-pull all needed graphic figures in parallel
     transfer_tasks: List[Dict[str, Any]] = []
+    mrms_tasks: List[Dict[str, Any]] = []
     for spec in slides_config:
         slide_type = str(spec.get("type", "same valid time")).strip().lower().replace("_", " ")
         prefix = spec.get("prefix")
@@ -609,7 +668,14 @@ def process_graphics_slides(
                 continue
             for item in row_items:
                 item_str = str(item).strip()
-                if item_str.lower() == "obs":
+                if item_str.lower().startswith("obs"):
+                    var, valid_dt = resolve_obs_cell_time(spec, row_items, item_str)
+                    dest_obs = output_dir / "graphics" / "obs" / format_mrms_filename(var, valid_dt)
+                    mrms_tasks.append({
+                        "var": var,
+                        "valid_dt": valid_dt,
+                        "dest_path": dest_obs,
+                    })
                     continue
                 if "valid" in slide_type:
                     exp_obj = resolve_experiment(item_str, plan.experiments)
@@ -666,6 +732,18 @@ def process_graphics_slides(
 
     if transfer_tasks:
         batch_pull_graphics_files(transfer_tasks)
+
+    # Pull uncached MRMS observation figures
+    if mrms_tasks:
+        unique_mrms_map = {str(t["dest_path"]): t for t in mrms_tasks}
+        unique_mrms = list(unique_mrms_map.values())
+        uncached_mrms = [t for t in unique_mrms if not is_valid_mrms_file(t["dest_path"])]
+        if uncached_mrms:
+            try:
+                from automats.mrms import fetch_mrms_images
+                fetch_mrms_images(uncached_mrms, output_dir=output_dir)
+            except Exception as e:
+                print(f"[!] Warning: Could not fetch MRMS observation figures: {e}", file=sys.stderr)
 
     # 4. Phase 2: Render each graphics slide into PowerPoint deck
     from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
@@ -734,9 +812,14 @@ def process_graphics_slides(
                 item_str = str(item).strip()
                 cell_left = margin + col_idx * (cell_width + col_gap)
 
-                if item_str.lower() == "obs":
+                if item_str.lower().startswith("obs"):
                     caption_text = "MRMS OBS"
-                    local_img = get_obs_placeholder(output_dir)
+                    var, valid_dt = resolve_obs_cell_time(spec, row_items, item_str)
+                    obs_target = output_dir / "graphics" / "obs" / format_mrms_filename(var, valid_dt)
+                    if is_valid_mrms_file(obs_target):
+                        local_img = obs_target
+                    else:
+                        local_img = get_obs_placeholder(output_dir)
                 elif "valid" in slide_type:
                     # 'same valid time': item is experiment reference (e.g. 'first', 'second')
                     exp_obj = resolve_experiment(item_str, plan.experiments)

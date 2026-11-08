@@ -52,7 +52,7 @@ from automats.mrms import (
     format_mrms_filename,
     is_valid_mrms_file,
 )
-from automats.graphics import parse_graphics_name, resolve_obs_cell_time
+from automats.graphics import parse_graphics_name, resolve_obs_cell_time, resolve_obs_tile
 
 
 def parse_time_spec(spec: str) -> List[datetime]:
@@ -256,7 +256,8 @@ def extract_obs_from_recipe(recipe_path: Path) -> List[Dict[str, Any]]:
                 item_str = str(item).strip()
                 if item_str.lower().startswith("obs"):
                     var, valid_dt = resolve_obs_cell_time(spec, row_items, item_str)
-                    tasks.append({"var": var, "valid_dt": valid_dt})
+                    tile = resolve_obs_tile(spec, row_items, item_str)
+                    tasks.append({"var": var, "valid_dt": valid_dt, "tile": tile})
     return tasks
 
 
@@ -268,6 +269,8 @@ def main(argv=None) -> int:
     parser.add_argument("recipe", nargs="?", type=Path, help="Optional YAML recipe containing graphics slides")
     parser.add_argument("-o", "--output-dir", type=Path, default=Path("graphics/obs"), help="Destination directory (default: ./graphics/obs)")
     parser.add_argument("--var", default="cref", help="Variable / product (default: cref)")
+    parser.add_argument("--tile", default=None,
+                        help="Geographic tile / subdomain (default: full or extracted from recipe; choices: full, NC, NE, NW, SC, SE, SW, EastCO)")
     parser.add_argument("--time", "--valid-time", dest="time",
                         help="Observation valid time, list, or range (e.g. 2024050700-2024050800-1h, 202405070600, or 2024050700,2024050706)")
     parser.add_argument("--update", action="store_true", help="Force re-download even if already cached locally")
@@ -291,12 +294,18 @@ def main(argv=None) -> int:
             print(f"[!] Error reading recipe '{args.recipe}': {e}", file=sys.stderr)
             return 1
 
+    # Override tile from CLI if provided
+    if args.tile and raw_tasks:
+        for t in raw_tasks:
+            t["tile"] = args.tile
+
     # 2. From --time
     if args.time:
         try:
             parsed_times = parse_time_spec(args.time)
+            tile_val = args.tile or "full"
             for v_dt in parsed_times:
-                raw_tasks.append({"var": args.var.lower(), "valid_dt": v_dt})
+                raw_tasks.append({"var": args.var.lower(), "valid_dt": v_dt, "tile": tile_val})
         except Exception as e:
             print(f"[!] Error parsing --time '{args.time}': {e}", file=sys.stderr)
             return 1
@@ -306,23 +315,25 @@ def main(argv=None) -> int:
         parser.print_help()
         return 1
 
-    # Deduplicate targets by (var, valid_dt)
-    unique_tasks: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    # Deduplicate targets by (var, tile, valid_dt)
+    unique_tasks: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     dest_dir = args.output_dir
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     for t in raw_tasks:
         var = t["var"]
         v_dt = t["valid_dt"]
-        fn = format_mrms_filename(var, v_dt)
+        tile = t.get("tile", "full")
+        fn = format_mrms_filename(var, v_dt, tile=tile)
         dest_path = dest_dir / fn
-        key = (var, v_dt.strftime("%Y%m%d%H%M"))
+        key = (var, tile.lower(), v_dt.strftime("%Y%m%d%H%M"))
         if key not in unique_tasks:
             unique_tasks[key] = {
                 "var": var,
                 "valid_dt": v_dt,
+                "tile": tile,
                 "dest_path": dest_path,
-                "url": build_mrms_url(v_dt, var),
+                "url": build_mrms_url(v_dt, var=var, tile=tile),
             }
 
     tasks = list(unique_tasks.values())
@@ -340,7 +351,8 @@ def main(argv=None) -> int:
         for t in tasks:
             status = "CACHED" if is_valid_mrms_file(t["dest_path"]) and not args.update else "PENDING"
             v_str = t["valid_dt"].strftime("%Y-%m-%d %H:%M UTC")
-            print(f"  [{status}] {t['dest_path'].name} | Valid: {v_str}")
+            tile_label = t.get("tile", "full")
+            print(f"  [{status}] {t['dest_path'].name} (Tile: {tile_label}) | Valid: {v_str}")
             print(f"           URL: {t['url']}")
         return 0
 

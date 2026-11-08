@@ -211,6 +211,50 @@ def resolve_obs_cell_time(
         return var, cycle_dt + timedelta(hours=fhr)
 
 
+def resolve_obs_tile(
+    spec: Dict[str, Any],
+    row_items: List[Any],
+    item_str: str,
+) -> str:
+    """
+    Resolves the geographic tile ('full', 'NC', 'EastCO', etc.) for an obs item.
+    Precedence:
+    1. Explicit obs item suffix: 'obs:EastCO', 'obs_EastCO', 'obs(EastCO)', 'obs[EastCO]'.
+    2. Slide spec 'tile' override.
+    3. Companion graphics in the same row (e.g. 'cref_EastCO_sfc_f006.png').
+    4. Slide spec 'graphics name' (e.g. 'cref_NC_sfc_f006.png').
+    Defaults to 'full'.
+    """
+    s = str(item_str).strip()
+    # Check if obs string embeds a tile: obs:EastCO, obs_EastCO, obs/EastCO, obs[EastCO], obs(EastCO)
+    # Ignore pure timestamps like obs_202405070600 or forecast leads like obs_f06
+    m_explicit = re.match(r"^obs[:_/\(\[]([A-Za-z0-9_-]+)[\)\]]?$", s, re.IGNORECASE)
+    if m_explicit:
+        cand = m_explicit.group(1).strip()
+        if not re.match(r"^(?:f\d+|\d{8,12}|cref|ref)$", cand, re.IGNORECASE):
+            return cand
+
+    # Slide spec 'tile' override
+    if spec.get("tile"):
+        return str(spec["tile"]).strip()
+
+    # Companion graphic in row_items
+    for companion in row_items:
+        c_str = str(companion).strip()
+        if not c_str.lower().startswith("obs") and ("." in c_str or "_f" in c_str):
+            _, tile_extracted, _ = parse_graphics_name(c_str)
+            if tile_extracted:
+                return tile_extracted
+
+    # Slide spec 'graphics name'
+    if spec.get("graphics name"):
+        _, tile_extracted, _ = parse_graphics_name(str(spec["graphics name"]))
+        if tile_extracted:
+            return tile_extracted
+
+    return "full"
+
+
 def detect_prefix_from_path(comroot: str) -> str:
     """
     Extracts the model prefix from a COMROOT path.
@@ -670,10 +714,12 @@ def process_graphics_slides(
                 item_str = str(item).strip()
                 if item_str.lower().startswith("obs"):
                     var, valid_dt = resolve_obs_cell_time(spec, row_items, item_str)
-                    dest_obs = output_dir / "graphics" / "obs" / format_mrms_filename(var, valid_dt)
+                    tile = resolve_obs_tile(spec, row_items, item_str)
+                    dest_obs = output_dir / "graphics" / "obs" / format_mrms_filename(var, valid_dt, tile=tile)
                     mrms_tasks.append({
                         "var": var,
                         "valid_dt": valid_dt,
+                        "tile": tile,
                         "dest_path": dest_obs,
                     })
                     continue
@@ -831,9 +877,10 @@ def process_graphics_slides(
                 cell_left = margin + col_idx * (cell_width + col_gap)
 
                 if item_str.lower().startswith("obs"):
-                    caption_text = "MRMS OBS"
+                    tile = resolve_obs_tile(spec, row_items, item_str)
+                    caption_text = f"MRMS OBS ({tile})" if tile.lower() not in ("full", "conus") else "MRMS OBS"
                     var, valid_dt = resolve_obs_cell_time(spec, row_items, item_str)
-                    obs_target = output_dir / "graphics" / "obs" / format_mrms_filename(var, valid_dt)
+                    obs_target = output_dir / "graphics" / "obs" / format_mrms_filename(var, valid_dt, tile=tile)
                     if is_valid_mrms_file(obs_target):
                         local_img = obs_target
                     else:

@@ -41,6 +41,19 @@ MRMS_PRODUCTS: Dict[str, Tuple[str, str]] = {
     "echo_top_50": ("echotopls", "EchoTop_50"),
 }
 
+# Subdomain / tile definitions mapped directly from pygraf (adb_graphics/figures/maps.py)
+MRMS_TILES: Dict[str, Dict[str, Any]] = {
+    "full": {"zoom": 4, "clon": -98.0, "clat": 38.0, "desc": "Full CONUS"},
+    "conus": {"zoom": 4, "clon": -98.0, "clat": 38.0, "desc": "Full CONUS"},
+    "nc": {"zoom": 6, "clon": -97.0, "clat": 43.5, "desc": "North Central"},
+    "ne": {"zoom": 6, "clon": -76.5, "clat": 42.0, "desc": "Northeast"},
+    "nw": {"zoom": 6, "clon": -114.0, "clat": 43.5, "desc": "Northwest"},
+    "sc": {"zoom": 6, "clon": -96.5, "clat": 32.5, "desc": "South Central"},
+    "se": {"zoom": 6, "clon": -82.75, "clat": 29.5, "desc": "Southeast"},
+    "sw": {"zoom": 6, "clon": -112.5, "clat": 34.75, "desc": "Southwest"},
+    "eastco": {"zoom": 8, "clon": -104.9, "clat": 39.0, "desc": "East Colorado"},
+}
+
 BOUNDING_BOX_SCRIPT = """(() => {
     const baseMap = document.getElementById('base_map');
     const sideLegend = document.getElementById('side_legend');
@@ -55,33 +68,44 @@ BOUNDING_BOX_SCRIPT = """(() => {
 })()"""
 
 
-def format_mrms_filename(var: str, valid_dt: datetime) -> str:
+def format_mrms_filename(var: str, valid_dt: datetime, tile: str = "full") -> str:
     """
-    Formats the MRMS filename based strictly on variable and valid observation time.
-    Format: mrms_{var}_{YYYYMMDDHHMM}.png (e.g. mrms_cref_202405070600.png)
+    Formats the MRMS filename strictly including variable, tile, and valid observation time.
+    Format: mrms_{var}_{tile}_{YYYYMMDDHHMM}.png
+    Examples:
+      mrms_cref_full_202405070600.png
+      mrms_cref_NC_202405070600.png
+      mrms_cref_EastCO_202405070600.png
     """
     clean_var = re.sub(r"[^A-Za-z0-9_-]+", "", var.strip().lower()) or "cref"
+    clean_tile = re.sub(r"[^A-Za-z0-9_-]+", "", tile.strip()) or "full"
     time_str = valid_dt.strftime("%Y%m%d%H%M")
-    return f"mrms_{clean_var}_{time_str}.png"
+    return f"mrms_{clean_var}_{clean_tile}_{time_str}.png"
 
 
-def parse_mrms_filename(filename: str) -> Optional[Tuple[str, datetime]]:
+def parse_mrms_filename(filename: str) -> Optional[Tuple[str, str, datetime]]:
     """
-    Parses 'mrms_{var}_{YYYYMMDDHHMM}.png' (or 10-digit 'mrms_{var}_{YYYYMMDDHH}.png').
-    Returns (var, valid_datetime) or None.
+    Parses 'mrms_{var}_{tile}_{YYYYMMDDHHMM}.png' (or 10-digit date).
+    Returns (var, tile, valid_datetime) or None.
     """
     name = Path(filename).name
-    m = re.fullmatch(r"mrms_([a-zA-Z0-9_-]+)_(\d{10}|\d{12})\.png", name, re.IGNORECASE)
+    m = re.fullmatch(r"mrms_([a-zA-Z0-9_-]+)_([a-zA-Z0-9_-]+)_(\d{10}|\d{12})\.png", name, re.IGNORECASE)
     if not m:
         return None
     var = m.group(1).lower()
-    t_str = m.group(2)
+    tile = m.group(2)
+    t_str = m.group(3)
     fmt = "%Y%m%d%H%M" if len(t_str) == 12 else "%Y%m%d%H"
     try:
         dt = datetime.strptime(t_str, fmt)
-        return var, dt
+        return var, tile, dt
     except ValueError:
         return None
+
+
+def parse_mrms_filename_details(filename: str) -> Optional[Tuple[str, str, datetime]]:
+    """Alias for parse_mrms_filename returning (var, tile, valid_datetime)."""
+    return parse_mrms_filename(filename)
 
 
 def is_valid_mrms_file(path: Path) -> bool:
@@ -102,18 +126,26 @@ def is_valid_mrms_file(path: Path) -> bool:
 def build_mrms_url(
     valid_dt: datetime,
     var: str = "cref",
-    zoom: int = 4,
-    clon: int = -98,
-    clat: int = 38,
+    tile: str = "full",
+    zoom: Optional[int] = None,
+    clon: Optional[float] = None,
+    clat: Optional[float] = None,
 ) -> str:
-    """Constructs the NOAA NSSL MRMS Product Viewer URL for a given observation valid datetime."""
+    """
+    Constructs the NOAA NSSL MRMS Product Viewer URL for a given observation valid datetime
+    and tile / viewport. If zoom/clon/clat are omitted, uses pygraf-aligned tile defaults.
+    """
     norm_var = var.strip().lower()
     ptype, prod = MRMS_PRODUCTS.get(norm_var, (f"{norm_var}ls", norm_var.upper()))
+    tile_cfg = MRMS_TILES.get(str(tile).strip().lower(), MRMS_TILES["full"])
+    z = zoom if zoom is not None else tile_cfg["zoom"]
+    x = clon if clon is not None else tile_cfg["clon"]
+    y = clat if clat is not None else tile_cfg["clat"]
     return (
         f"https://mrms.nssl.noaa.gov/qvs/product_viewer/index.php?"
         f"web_exec_mode=run&menu=menu_config.txt&year={valid_dt.year}&month={valid_dt.month}"
         f"&day={valid_dt.day}&hour={valid_dt.hour}&minute={valid_dt.minute}"
-        f"&time_mode=static&zoom={zoom}&clon={clon}&clat={clat}&base=0&overlays=1&mping_mode=0"
+        f"&time_mode=static&zoom={z}&clon={x}&clat={y}&base=0&overlays=1&mping_mode=0"
         f"&product_type={ptype}&product={prod}"
     )
 
@@ -214,9 +246,10 @@ def fetch_mrms_images(
     for t in tasks:
         var = str(t.get("var", "cref")).strip().lower()
         valid_dt = t["valid_dt"]
+        tile = str(t.get("tile", "full")).strip()
         dest = t.get("dest_path")
         if not dest:
-            dest = obs_dir / format_mrms_filename(var, valid_dt)
+            dest = obs_dir / format_mrms_filename(var, valid_dt, tile=tile)
         dest_path = Path(dest)
         results[str(dest_path)] = dest_path
 
@@ -226,8 +259,9 @@ def fetch_mrms_images(
             needed.append({
                 "var": var,
                 "valid_dt": valid_dt,
+                "tile": tile,
                 "dest_path": dest_path,
-                "url": build_mrms_url(valid_dt, var),
+                "url": build_mrms_url(valid_dt, var=var, tile=tile),
             })
 
     if not needed:

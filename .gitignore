@@ -10,3 +10,5 @@ figures/
 results
 tmp/
 .DS_Store
+.hpc_config
+graphics/

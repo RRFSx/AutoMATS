@@ -48,16 +48,37 @@ plots:
 #  statistic: [CSI, BIAS]
 #  Difference curves: "Diff all curves against the 1st added curve"
 
-- name: Ceiling_dieoff
-  application: "Ceiling and Visibility"
-  plot_type: "die off"
-  region: "All HRRR domain"
-  matched_samples: true
-  variable: ["ceiling"]
-  Threshold: [500]
-  statistic: [CSI, BIAS]
-  Difference curves: "Diff all curves against the 1st added curve"
+#- name: ceiling_dieoff
+#  application: "Ceiling and Visibility"
+#  plot_type: "die off"
+#  region: "All HRRR domain"
+#  matched_samples: true
+#  variable: ["ceiling"]
+#  Threshold: [500]
+#  statistic: [CSI, BIAS]
+#  Difference curves: "Diff all curves against the 1st added curve"
 
+#- name: radiation_tseries
+#  application: "Surface Radiation"
+#  plot_type: "Time Series"
+#  matched_samples: true
+#  statistic: [rmse, bias]
+#  forecast lead time: [0, 3]
+
+- name: radiation_dieoff
+  application: "Surface Radiation"
+  plot_type: "die off"
+  matched_samples: true
+  statistic: [rmse, bias]
+
+- name: radiation_valid_time
+  application: "Surface Radiation"
+  plot_type: "Valid Time"
+  matched_samples: true
+  statistic: [rmse, bias]
+  forecast lead time: [0, 3]
+
+# ============================ slides ============================
 slides:
 - plot group: sfc_tseries
   title: Surface Time Series RMSE f000h

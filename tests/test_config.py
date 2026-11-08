@@ -692,6 +692,15 @@ class ConfigTests(unittest.TestCase):
         raw.pop("automation")
         self.assertEqual(build_plan(raw).settings.inter_plot_waiting_seconds, 1)
 
+    def test_recipe_title_parsing(self):
+        raw = example()
+        self.assertIsNone(build_plan(raw).title)
+        raw["title"] = "RRFSv2 Verification Study"
+        self.assertEqual(build_plan(raw).title, "RRFSv2 Verification Study")
+        raw["title"] = "   "
+        with self.assertRaises(ConfigError):
+            build_plan(raw)
+
 
 if __name__ == "__main__":
     unittest.main()

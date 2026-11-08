@@ -14,7 +14,7 @@ class SetupTests(unittest.TestCase):
         self.project = self.root / "project with spaces"
         self.project.mkdir()
         source = Path(__file__).resolve().parents[1]
-        for name in ("setup.sh", "run.sh", "slides.sh"):
+        for name in ("setup.sh", "run.sh"):
             shutil.copy2(source / name, self.project / name)
         self.log = self.root / "calls.log"
         self.environment = dict(os.environ, AUTOMATS_TEST_LOG=str(self.log))
@@ -100,21 +100,6 @@ class SetupTests(unittest.TestCase):
         self.assertIn("setup.sh", result.stderr)
         self.assertFalse(self.log.exists())
 
-    def test_slides_launcher_calls_run_sh_with_slides_only(self):
-        self.install_fake_environment()
-        self.environment["AUTOMATS_TEST_EXIT_CODE"] = "0"
-        result = self.run_script("slides.sh", "config with spaces.yaml", "--output-dir", "my figures")
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(
-            self.log.read_text().splitlines(),
-            ["<call>", str(self.root), "-m", "automats", "config with spaces.yaml",
-             "--slides-only", "--output-dir", "my figures"],
-        )
-
-    def test_slides_launcher_reports_missing_arguments(self):
-        result = self.run_script("slides.sh")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("Usage:", result.stderr)
 
 
 if __name__ == "__main__":

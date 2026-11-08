@@ -105,7 +105,7 @@ def usage(error_msg=None):
         "  --output-dir DIR   Output directory (default: results/rt_rrfsv2_<tag>)\n"
         "  --plan             List planned figures without running browser\n"
         "  --metadata-only    Refresh metadata on cached figures locally\n"
-        "  --slides-only      Build PowerPoint deck from existing PNGs\n"
+        "  --slides-only, --slide-only  Build PowerPoint deck from existing PNGs\n"
         "  --update           Regenerate figures even if they already exist in output directory\n"
         "  --limit N          Generate at most N figures\n"
         "  --show-browser     Run Chrome visibly instead of headless background\n"
@@ -167,6 +167,12 @@ def main(argv=None):
         {"name": "rrfsv2b", "color": "blue"},
         {"name": "HRRR_OPS", "color": "orange"},
     ]
+
+    # Real-time runs should always disable pygraf graphics slides
+    if "pygraf graphics slides" in data and isinstance(data["pygraf graphics slides"], dict):
+        data["pygraf graphics slides"]["enable"] = False
+    else:
+        data["pygraf graphics slides"] = {"enable": False}
 
     # Set start and end dates only when explicitly provided by the user;
     # otherwise leave unset so MATS automatically uses its dynamic latest 30-day window from the database.

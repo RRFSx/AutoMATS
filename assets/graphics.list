@@ -1,110 +1,110 @@
-  1 1ref_{TILE}_1000m_f{FHR}.png
-  2 acfrozr_{TILE}_sfc_f{FHR}.png
-  3 acfrzr_{TILE}_sfc_f{FHR}.png
-  4 acsnod_{TILE}_sfc_f{FHR}.png
-  5 cape_{TILE}_mu_f{FHR}.png
-  6 cape_{TILE}_mul_f{FHR}.png
-  7 cape_{TILE}_mx90mb_f{FHR}.png
-  8 cape_{TILE}_sfc_f{FHR}.png
-  9 ceilexp2_{TILE}_ua_f{FHR}.png
- 10 ceilexp_{TILE}_ua_f{FHR}.png
- 11 ceil_{TILE}_ua_f{FHR}.png
- 12 cin_{TILE}_sfc_f{FHR}.png
- 13 cloudbase_{TILE}_ua_f{FHR}.png
- 14 cloudcover_{TILE}_bndylay_f{FHR}.png
- 15 cloudcover_{TILE}_high_f{FHR}.png
- 16 cloudcover_{TILE}_low_f{FHR}.png
- 17 cloudcover_{TILE}_mid_f{FHR}.png
- 18 cloudcover_{TILE}_total_f{FHR}.png
- 19 cpofp_{TILE}_sfc_f{FHR}.png
- 20 cref_{TILE}_sfc_f{FHR}.png
- 21 ctop_{TILE}_ua_f{FHR}.png
- 22 dewp_{TILE}_2m_f{FHR}.png
- 23 echotop_{TILE}_sfc_f{FHR}.png
- 24 flru_{TILE}_sfc_f{FHR}.png
- 25 gust_{TILE}_10m_f{FHR}.png
- 26 hail_{TILE}_max_f{FHR}.png
- 27 hail_{TILE}_maxsfc_f{FHR}.png
- 28 hlcy_{TILE}_mn02_f{FHR}.png
- 29 hlcy_{TILE}_mn03_f{FHR}.png
- 30 hlcy_{TILE}_mn25_f{FHR}.png
- 31 hlcy_{TILE}_mx02_f{FHR}.png
- 32 hlcy_{TILE}_mx03_f{FHR}.png
- 33 hlcy_{TILE}_mx25_f{FHR}.png
- 34 hlcy_{TILE}_sr01_f{FHR}.png
- 35 hlcy_{TILE}_sr03_f{FHR}.png
- 36 hlcytot_{TILE}_mn02_f{FHR}.png
- 37 hlcytot_{TILE}_mn03_f{FHR}.png
- 38 hlcytot_{TILE}_mn25_f{FHR}.png
- 39 hlcytot_{TILE}_mx02_f{FHR}.png
- 40 hlcytot_{TILE}_mx03_f{FHR}.png
- 41 hlcytot_{TILE}_mx25_f{FHR}.png
- 42 hpbl_{TILE}_sfc_f{FHR}.png
- 43 lcl_{TILE}_sfc_f{FHR}.png
- 44 lhtfl_{TILE}_sfc_f{FHR}.png
- 45 li_{TILE}_best_f{FHR}.png
- 46 li_{TILE}_sfc_f{FHR}.png
- 47 mref_{TILE}_sfc_f{FHR}.png
- 48 pres_{TILE}_msl_f{FHR}.png
- 49 pres_{TILE}_sfc_f{FHR}.png
- 50 ptmp_{TILE}_2m_f{FHR}.png
- 51 ptyp_{TILE}_sfc_f{FHR}.png
- 52 pwtr_{TILE}_sfc_f{FHR}.png
- 53 ref_{TILE}_m10_f{FHR}.png
- 54 ref_{TILE}_maxm10_f{FHR}.png
- 55 rh_{TILE}_2m_f{FHR}.png
- 56 rh_{TILE}_850mb_f{FHR}.png
- 57 rh_{TILE}_mean_f{FHR}.png
- 58 rh_{TILE}_pw_f{FHR}.png
- 59 rvil_{TILE}_sfc_f{FHR}.png
- 60 shear_{TILE}_01km_f{FHR}.png
- 61 shear_{TILE}_06km_f{FHR}.png
- 62 shtfl_{TILE}_sfc_f{FHR}.png
- 63 snod_{TILE}_sfc_f{FHR}.png
- 64 snoliqr_{TILE}_sfc_f{FHR}.png
- 65 soilt_{TILE}_0cm_f{FHR}.png
- 66 soilt_{TILE}_10cm_f{FHR}.png
- 67 soilt_{TILE}_1.6m_f{FHR}.png
- 68 soilt_{TILE}_1cm_f{FHR}.png
- 69 soilt_{TILE}_1m_f{FHR}.png
- 70 soilt_{TILE}_30cm_f{FHR}.png
- 71 soilt_{TILE}_3m_f{FHR}.png
- 72 soilt_{TILE}_4cm_f{FHR}.png
- 73 soilt_{TILE}_60cm_f{FHR}.png
- 74 soilw_{TILE}_0cm_f{FHR}.png
- 75 soilw_{TILE}_10cm_f{FHR}.png
- 76 soilw_{TILE}_1.6m_f{FHR}.png
- 77 soilw_{TILE}_1cm_f{FHR}.png
- 78 soilw_{TILE}_1m_f{FHR}.png
- 79 soilw_{TILE}_30cm_f{FHR}.png
- 80 soilw_{TILE}_3m_f{FHR}.png
- 81 soilw_{TILE}_4cm_f{FHR}.png
- 82 soilw_{TILE}_60cm_f{FHR}.png
- 83 solar_{TILE}_sfc_f{FHR}.png
- 84 ssrun_{TILE}_sfc_f{FHR}.png
- 85 temp_{TILE}_2ds_f{FHR}.png
- 86 temp_{TILE}_2m_f{FHR}.png
- 87 temp_{TILE}_500mb_f{FHR}.png
- 88 temp_{TILE}_700mb_f{FHR}.png
- 89 temp_{TILE}_850mb_f{FHR}.png
- 90 temp_{TILE}_925mb_f{FHR}.png
- 91 temp_{TILE}_sfc_f{FHR}.png
- 92 totp_{TILE}_sfc_f{FHR}.png
- 93 ulwrf_{TILE}_sfc_f{FHR}.png
- 94 ulwrf_{TILE}_top_f{FHR}.png
- 95 uswrf_{TILE}_sfc_f{FHR}.png
- 96 uswrf_{TILE}_top_f{FHR}.png
- 97 vbdsf_{TILE}_sfc_f{FHR}.png
- 98 vddsf_{TILE}_sfc_f{FHR}.png
- 99 vis_{TILE}_sfc_f{FHR}.png
-100 vort_{TILE}_500mb_f{FHR}.png
-101 vvel_{TILE}_700mb_f{FHR}.png
-102 vvel_{TILE}_mean_f{FHR}.png
-103 vvort_{TILE}_mx01_f{FHR}.png
-104 vvort_{TILE}_mx02_f{FHR}.png
-105 weasd_{TILE}_sfc_f{FHR}.png
-106 wspeed_{TILE}_10m_f{FHR}.png
-107 wspeed_{TILE}_250mb_f{FHR}.png
-108 wspeed_{TILE}_80m_f{FHR}.png
-109 wspeed_{TILE}_850mb_f{FHR}.png
-110 wspeed_{TILE}_mup_f{FHR}.png
+  1 1ref_{tile}_1000m_f{fhr}.png
+  2 acfrozr_{tile}_sfc_f{fhr}.png
+  3 acfrzr_{tile}_sfc_f{fhr}.png
+  4 acsnod_{tile}_sfc_f{fhr}.png
+  5 cape_{tile}_mu_f{fhr}.png
+  6 cape_{tile}_mul_f{fhr}.png
+  7 cape_{tile}_mx90mb_f{fhr}.png
+  8 cape_{tile}_sfc_f{fhr}.png
+  9 ceilexp2_{tile}_ua_f{fhr}.png
+ 10 ceilexp_{tile}_ua_f{fhr}.png
+ 11 ceil_{tile}_ua_f{fhr}.png
+ 12 cin_{tile}_sfc_f{fhr}.png
+ 13 cloudbase_{tile}_ua_f{fhr}.png
+ 14 cloudcover_{tile}_bndylay_f{fhr}.png
+ 15 cloudcover_{tile}_high_f{fhr}.png
+ 16 cloudcover_{tile}_low_f{fhr}.png
+ 17 cloudcover_{tile}_mid_f{fhr}.png
+ 18 cloudcover_{tile}_total_f{fhr}.png
+ 19 cpofp_{tile}_sfc_f{fhr}.png
+ 20 cref_{tile}_sfc_f{fhr}.png
+ 21 ctop_{tile}_ua_f{fhr}.png
+ 22 dewp_{tile}_2m_f{fhr}.png
+ 23 echotop_{tile}_sfc_f{fhr}.png
+ 24 flru_{tile}_sfc_f{fhr}.png
+ 25 gust_{tile}_10m_f{fhr}.png
+ 26 hail_{tile}_max_f{fhr}.png
+ 27 hail_{tile}_maxsfc_f{fhr}.png
+ 28 hlcy_{tile}_mn02_f{fhr}.png
+ 29 hlcy_{tile}_mn03_f{fhr}.png
+ 30 hlcy_{tile}_mn25_f{fhr}.png
+ 31 hlcy_{tile}_mx02_f{fhr}.png
+ 32 hlcy_{tile}_mx03_f{fhr}.png
+ 33 hlcy_{tile}_mx25_f{fhr}.png
+ 34 hlcy_{tile}_sr01_f{fhr}.png
+ 35 hlcy_{tile}_sr03_f{fhr}.png
+ 36 hlcytot_{tile}_mn02_f{fhr}.png
+ 37 hlcytot_{tile}_mn03_f{fhr}.png
+ 38 hlcytot_{tile}_mn25_f{fhr}.png
+ 39 hlcytot_{tile}_mx02_f{fhr}.png
+ 40 hlcytot_{tile}_mx03_f{fhr}.png
+ 41 hlcytot_{tile}_mx25_f{fhr}.png
+ 42 hpbl_{tile}_sfc_f{fhr}.png
+ 43 lcl_{tile}_sfc_f{fhr}.png
+ 44 lhtfl_{tile}_sfc_f{fhr}.png
+ 45 li_{tile}_best_f{fhr}.png
+ 46 li_{tile}_sfc_f{fhr}.png
+ 47 mref_{tile}_sfc_f{fhr}.png
+ 48 pres_{tile}_msl_f{fhr}.png
+ 49 pres_{tile}_sfc_f{fhr}.png
+ 50 ptmp_{tile}_2m_f{fhr}.png
+ 51 ptyp_{tile}_sfc_f{fhr}.png
+ 52 pwtr_{tile}_sfc_f{fhr}.png
+ 53 ref_{tile}_m10_f{fhr}.png
+ 54 ref_{tile}_maxm10_f{fhr}.png
+ 55 rh_{tile}_2m_f{fhr}.png
+ 56 rh_{tile}_850mb_f{fhr}.png
+ 57 rh_{tile}_mean_f{fhr}.png
+ 58 rh_{tile}_pw_f{fhr}.png
+ 59 rvil_{tile}_sfc_f{fhr}.png
+ 60 shear_{tile}_01km_f{fhr}.png
+ 61 shear_{tile}_06km_f{fhr}.png
+ 62 shtfl_{tile}_sfc_f{fhr}.png
+ 63 snod_{tile}_sfc_f{fhr}.png
+ 64 snoliqr_{tile}_sfc_f{fhr}.png
+ 65 soilt_{tile}_0cm_f{fhr}.png
+ 66 soilt_{tile}_10cm_f{fhr}.png
+ 67 soilt_{tile}_1.6m_f{fhr}.png
+ 68 soilt_{tile}_1cm_f{fhr}.png
+ 69 soilt_{tile}_1m_f{fhr}.png
+ 70 soilt_{tile}_30cm_f{fhr}.png
+ 71 soilt_{tile}_3m_f{fhr}.png
+ 72 soilt_{tile}_4cm_f{fhr}.png
+ 73 soilt_{tile}_60cm_f{fhr}.png
+ 74 soilw_{tile}_0cm_f{fhr}.png
+ 75 soilw_{tile}_10cm_f{fhr}.png
+ 76 soilw_{tile}_1.6m_f{fhr}.png
+ 77 soilw_{tile}_1cm_f{fhr}.png
+ 78 soilw_{tile}_1m_f{fhr}.png
+ 79 soilw_{tile}_30cm_f{fhr}.png
+ 80 soilw_{tile}_3m_f{fhr}.png
+ 81 soilw_{tile}_4cm_f{fhr}.png
+ 82 soilw_{tile}_60cm_f{fhr}.png
+ 83 solar_{tile}_sfc_f{fhr}.png
+ 84 ssrun_{tile}_sfc_f{fhr}.png
+ 85 temp_{tile}_2ds_f{fhr}.png
+ 86 temp_{tile}_2m_f{fhr}.png
+ 87 temp_{tile}_500mb_f{fhr}.png
+ 88 temp_{tile}_700mb_f{fhr}.png
+ 89 temp_{tile}_850mb_f{fhr}.png
+ 90 temp_{tile}_925mb_f{fhr}.png
+ 91 temp_{tile}_sfc_f{fhr}.png
+ 92 totp_{tile}_sfc_f{fhr}.png
+ 93 ulwrf_{tile}_sfc_f{fhr}.png
+ 94 ulwrf_{tile}_top_f{fhr}.png
+ 95 uswrf_{tile}_sfc_f{fhr}.png
+ 96 uswrf_{tile}_top_f{fhr}.png
+ 97 vbdsf_{tile}_sfc_f{fhr}.png
+ 98 vddsf_{tile}_sfc_f{fhr}.png
+ 99 vis_{tile}_sfc_f{fhr}.png
+100 vort_{tile}_500mb_f{fhr}.png
+101 vvel_{tile}_700mb_f{fhr}.png
+102 vvel_{tile}_mean_f{fhr}.png
+103 vvort_{tile}_mx01_f{fhr}.png
+104 vvort_{tile}_mx02_f{fhr}.png
+105 weasd_{tile}_sfc_f{fhr}.png
+106 wspeed_{tile}_10m_f{fhr}.png
+107 wspeed_{tile}_250mb_f{fhr}.png
+108 wspeed_{tile}_80m_f{fhr}.png
+109 wspeed_{tile}_850mb_f{fhr}.png
+110 wspeed_{tile}_mup_f{fhr}.png

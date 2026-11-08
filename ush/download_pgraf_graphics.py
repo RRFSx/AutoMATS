@@ -1,0 +1,974 @@
+#!/usr/bin/env python3
+"""
+download_pgraf_graphics.py: Standalone CLI utility to download pygraf graphics from HPC.
+
+Usage:
+    ush/download_pgraf_graphics.py <recipe.yaml> [options]
+
+Options:
+    -o, --output-dir DIR   Local destination directory (default: ./graphics)
+    -w, --workers N        Max parallel SCP downloads (default: 4)
+    --update               Re-download existing files instead of using local cache
+    --dry-run              List all targeted remote files without downloading
+    --debug                Print verbose transfer details, including missing or uncopied files
+    -h, --help             Show this help message and exit
+"""
+
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timedelta
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+# Auto-re-exec with local venv python if available and not already active
+ROOT = Path(__file__).resolve().parent.parent
+venv_dir = ROOT / ".venv"
+venv_python = venv_dir / "bin" / "python"
+if venv_python.is_file() and Path(sys.prefix).resolve() != venv_dir.resolve():
+    try:
+        os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve())] + sys.argv[1:])
+    except (PermissionError, OSError):
+        pass
+
+
+def find_hpc_config() -> Optional[Path]:
+    """Finds .hpc_config in CWD or AutoMATS root directory."""
+    cwd_dot = Path.cwd() / ".hpc_config"
+    if cwd_dot.exists():
+        return cwd_dot
+    root_dot = ROOT / ".hpc_config"
+    if root_dot.exists():
+        return root_dot
+    return None
+
+
+def load_hpc_config() -> Dict[str, Dict[str, Any]]:
+    """Loads .hpc_config dictionary."""
+    path = find_hpc_config()
+    if not path or not path.exists():
+        return {}
+    cfg: Dict[str, Dict[str, Any]] = {}
+    current = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith(":") and ":" not in line[:-1]:
+            current = line[:-1].strip().lower()
+            cfg[current] = {}
+        elif current and ":" in line:
+            k, v = line.split(":", 1)
+            k = k.strip()
+            v = v.strip()
+            if v.lower() in ("null", "none", "~", ""):
+                cfg[current][k] = None
+            elif v.isdigit():
+                cfg[current][k] = int(v)
+            else:
+                cfg[current][k] = v
+    return cfg
+
+
+def test_local_access(username: str, local_port: int, timeout: float = 2.5) -> bool:
+    """Verifies that SSH access through localhost:<local_port> is currently active."""
+    cmd = [
+        "ssh",
+        "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={int(timeout)}",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "LogLevel=ERROR",
+        "-p", str(local_port),
+        f"{username}@localhost",
+        "true",
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _parse_yaml_scalar(v: str) -> Any:
+    v = v.strip()
+    if v.startswith("[") and v.endswith("]"):
+        inner = v[1:-1].strip()
+        return [x.strip().strip("'\"") for x in inner.split(",") if x.strip()] if inner else []
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        return v[1:-1]
+    if v.isdigit():
+        return int(v)
+    return v
+
+
+def parse_simple_yaml(text: str) -> Dict[str, Any]:
+    """Pure-Python indentation-aware YAML parser for recipes without requiring PyYAML."""
+    raw_lines: List[Tuple[int, str]] = []
+    for raw in text.splitlines():
+        line = raw
+        if "#" in line:
+            line = line.split("#", 1)[0]
+        if line.strip():
+            indent = len(line) - len(line.lstrip(" "))
+            raw_lines.append((indent, line.strip()))
+
+    idx = 0
+
+    def parse_node(base_indent: int) -> Any:
+        nonlocal idx
+        if idx >= len(raw_lines):
+            return None
+        indent, line = raw_lines[idx]
+        if line.startswith("- "):
+            res_list: List[Any] = []
+            list_indent = indent
+            while idx < len(raw_lines):
+                cur_indent, cur_line = raw_lines[idx]
+                if cur_indent < list_indent:
+                    break
+                if cur_line.startswith("- "):
+                    content = cur_line[2:].strip()
+                    idx += 1
+                    if ":" in content and not content.endswith("]"):
+                        k, v = content.split(":", 1)
+                        k = k.strip().strip("'\"")
+                        v = v.strip()
+                        item_dict: Dict[str, Any] = {}
+                        if v:
+                            item_dict[k] = _parse_yaml_scalar(v)
+                        else:
+                            if idx < len(raw_lines) and raw_lines[idx][0] > cur_indent:
+                                item_dict[k] = parse_node(raw_lines[idx][0])
+                            else:
+                                item_dict[k] = None
+                        while idx < len(raw_lines):
+                            ni, nl = raw_lines[idx]
+                            if ni <= cur_indent or nl.startswith("- "):
+                                break
+                            if ":" in nl:
+                                nk, nv = nl.split(":", 1)
+                                nk = nk.strip().strip("'\"")
+                                nv = nv.strip()
+                                idx += 1
+                                if nv:
+                                    item_dict[nk] = _parse_yaml_scalar(nv)
+                                else:
+                                    if idx < len(raw_lines) and raw_lines[idx][0] > ni:
+                                        item_dict[nk] = parse_node(raw_lines[idx][0])
+                                    else:
+                                        item_dict[nk] = None
+                            else:
+                                idx += 1
+                        res_list.append(item_dict)
+                    else:
+                        val = _parse_yaml_scalar(content)
+                        if idx < len(raw_lines) and raw_lines[idx][0] > cur_indent and not raw_lines[idx][1].startswith("- "):
+                            sub_block = parse_node(raw_lines[idx][0])
+                            if isinstance(val, str) and isinstance(sub_block, dict):
+                                res_list.append({val: sub_block})
+                            else:
+                                res_list.append(val)
+                        else:
+                            res_list.append(val)
+                else:
+                    break
+            return res_list
+        else:
+            res_dict: Dict[str, Any] = {}
+            dict_indent = indent
+            while idx < len(raw_lines):
+                cur_indent, cur_line = raw_lines[idx]
+                if cur_indent < dict_indent:
+                    break
+                if cur_line.startswith("- "):
+                    break
+                if ":" in cur_line:
+                    k, v = cur_line.split(":", 1)
+                    k = k.strip().strip("'\"")
+                    v = v.strip()
+                    idx += 1
+                    if v:
+                        res_dict[k] = _parse_yaml_scalar(v)
+                    else:
+                        if idx < len(raw_lines) and (
+                            raw_lines[idx][0] > cur_indent
+                            or (raw_lines[idx][1].startswith("- ") and raw_lines[idx][0] >= cur_indent)
+                        ):
+                            res_dict[k] = parse_node(raw_lines[idx][0])
+                        else:
+                            res_dict[k] = None
+                else:
+                    idx += 1
+            return res_dict
+
+    parsed = parse_node(0)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def load_recipe_yaml(path: Path) -> Dict[str, Any]:
+    """Loads recipe YAML file using PyYAML or our pure-Python fallback parser."""
+    try:
+        import yaml
+        with path.open(encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+            if isinstance(data, dict):
+                return data
+    except ImportError:
+        pass
+
+    raw = path.read_text(encoding="utf-8")
+    return parse_simple_yaml(raw)
+
+
+def extract_expname(remote_path: str) -> str:
+    """
+    Extracts expname from the string before '/com' and after the previous '/'.
+    E.g. /gpfs/f6/.../OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4 -> RRFSv2X.retv4
+    """
+    clean = remote_path.rstrip("/")
+    m = re.search(r"/([^/]+)/com(?:/|$)", clean)
+    if m:
+        return m.group(1)
+    parts = clean.split("/")
+    if "com" in parts:
+        idx = parts.index("com")
+        if idx > 0:
+            return parts[idx - 1]
+    return parts[-1]
+
+
+def detect_prefix_from_path(comroot: str) -> str:
+    """
+    Extracts the model prefix from a COMROOT path.
+    E.g. /gpfs/f6/.../com/rrfs/v2.1.4 -> rrfs
+         /com/hrrr/v4.1 -> hrrr
+         /scratch1/.../com/rap/v5.0 -> rap
+    """
+    clean = comroot.rstrip("/")
+    m = re.search(r"/com/([^/]+)(?:/|$)", clean)
+    if m:
+        return m.group(1)
+    parts = clean.split("/")
+    if "com" in parts:
+        idx = parts.index("com")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return ""
+
+
+def detect_prefix(remote_comroot: str, username: str = "", port: int = 0) -> str:
+    """
+    Detects model prefix under COMROOT.
+    1. First tries extracting from the path directly: .../com/<prefix>/... -> <prefix>
+    2. If not found in path and port is available, queries remote COMROOT for <prefix>.YYYYMMDD directories.
+    3. Falls back to 'rrfs' as default.
+    """
+    p = detect_prefix_from_path(remote_comroot)
+    if p:
+        return p
+
+    if username and port:
+        try:
+            cmd = [
+                "ssh",
+                "-p", str(port),
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=3",
+                "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "LogLevel=ERROR",
+                f"{username}@localhost",
+                f"ls -d {remote_comroot.rstrip('/')}/*.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null | head -n1",
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0)
+            if res.returncode == 0 and res.stdout.strip():
+                dir_name = Path(res.stdout.strip()).name
+                if "." in dir_name:
+                    cand = dir_name.split(".")[0].strip()
+                    if cand:
+                        return cand
+        except Exception:
+            pass
+
+    return "rrfs"
+
+
+def parse_fhr_list(raw_fhr: Any) -> List[int]:
+    """
+    Parses fhr parameter into list of integer forecast lead hours.
+    Accepts: [0-6], [0, 1, 2], [0-12-3], etc.
+    """
+    items = raw_fhr if isinstance(raw_fhr, list) else [raw_fhr]
+    fhrs = []
+    for item in items:
+        if isinstance(item, int):
+            if item < 0:
+                # Defensive handling for unquoted 0-72 parsed as -72
+                fhrs.extend(range(0, abs(item) + 1))
+            else:
+                fhrs.append(item)
+        elif isinstance(item, str):
+            s = item.strip().strip("'\"")
+            # Range format: start-end or start-end-step
+            m = re.match(r"^(\d+)-(\d+)(?:-(\d+))?$", s)
+            if m:
+                start = int(m.group(1))
+                end = int(m.group(2))
+                step = int(m.group(3)) if m.group(3) else 1
+                fhrs.extend(range(start, end + 1, step))
+            elif s.isdigit():
+                fhrs.append(int(s))
+            else:
+                raise ValueError(f"Invalid fhr specification: {item}")
+        else:
+            raise ValueError(f"Invalid fhr type: {type(item)}")
+    return sorted(list(set(fhrs)))
+
+
+def parse_fhr_config(raw_fhr: Any) -> Dict[str, Any]:
+    """
+    Parses fhr parameter into structured configuration mapping cycle hours to forecast lead hours.
+    Supports:
+      1) Legacy flat format: [0-6], 0-6, [0, 1, 2]
+      2) List of dicts / mapping:
+         fhr:
+           - default: [0, 1]
+           - '00,12': [0-72]
+      3) Direct dict:
+         fhr:
+           default: [0, 1]
+           '00,12': [0-72]
+    """
+    cfg: Dict[str, Any] = {
+        "specific": [],  # list of (set_of_hours: set[int], fhrs: list[int])
+        "default": None,
+        "legacy": None,
+    }
+
+    def _parse_val(val: Any) -> List[int]:
+        if isinstance(val, str):
+            v_str = val.strip()
+            if v_str.startswith("[") and v_str.endswith("]"):
+                inner = v_str[1:-1].strip()
+                val = [x.strip() for x in inner.split(",") if x.strip()] if inner else []
+        return parse_fhr_list(val)
+
+    if isinstance(raw_fhr, dict):
+        for k, v in raw_fhr.items():
+            k_str = str(k).strip().strip("'\"").lower()
+            if k_str == "default":
+                cfg["default"] = _parse_val(v)
+            else:
+                hours = set()
+                for h in k_str.split(","):
+                    h = h.strip()
+                    if h.isdigit():
+                        hours.add(int(h))
+                if hours:
+                    cfg["specific"].append((hours, _parse_val(v)))
+        return cfg
+
+    items = raw_fhr if isinstance(raw_fhr, list) else [raw_fhr]
+
+    is_mapping = False
+    for item in items:
+        if isinstance(item, dict):
+            is_mapping = True
+            break
+        if isinstance(item, str) and ":" in item:
+            is_mapping = True
+            break
+
+    if not is_mapping:
+        cfg["legacy"] = parse_fhr_list(raw_fhr)
+        return cfg
+
+    for item in items:
+        if isinstance(item, dict):
+            for k, v in item.items():
+                k_str = str(k).strip().strip("'\"").lower()
+                if k_str == "default":
+                    cfg["default"] = _parse_val(v)
+                else:
+                    hours = set()
+                    for h in k_str.split(","):
+                        h = h.strip()
+                        if h.isdigit():
+                            hours.add(int(h))
+                    if hours:
+                        cfg["specific"].append((hours, _parse_val(v)))
+        elif isinstance(item, str) and ":" in item:
+            k, v = item.split(":", 1)
+            k_str = k.strip().strip("'\"").lower()
+            if k_str == "default":
+                cfg["default"] = _parse_val(v)
+            else:
+                hours = set()
+                for h in k_str.split(","):
+                    h = h.strip()
+                    if h.isdigit():
+                        hours.add(int(h))
+                if hours:
+                    cfg["specific"].append((hours, _parse_val(v)))
+
+    return cfg
+
+
+def resolve_fhrs_for_cycle(fhr_cfg: Dict[str, Any], cyc_str: str) -> List[int]:
+    """
+    Returns the sorted list of forecast lead hours for the specified cycle string (YYYYMMDDHH).
+    """
+    if fhr_cfg.get("legacy") is not None:
+        return fhr_cfg["legacy"]
+
+    try:
+        cyc_hour = int(cyc_str[8:10])
+    except (IndexError, ValueError):
+        cyc_hour = -1
+
+    for hours_set, fhrs in fhr_cfg.get("specific", []):
+        if cyc_hour in hours_set:
+            return fhrs
+
+    if fhr_cfg.get("default") is not None:
+        return fhr_cfg["default"]
+
+    return [0]
+
+
+def parse_cycle_list(raw_cycle: Any) -> List[str]:
+    """
+    Parses cycle parameter into list of 10-digit YYYYMMDDHH strings.
+    Accepts: [2024050600-2024051300], [2024050600-2024051300-24], [2024050600, 2024050700].
+    If step is missing, defaults to 1h.
+    """
+    items = raw_cycle if isinstance(raw_cycle, list) else [raw_cycle]
+    cycles = []
+    for item in items:
+        s = str(item).strip()
+        # Range format: YYYYMMDDHH-YYYYMMDDHH or YYYYMMDDHH-YYYYMMDDHH-step
+        m = re.match(r"^(\d{10})-(\d{10})(?:-(\d+))?$", s)
+        if m:
+            s_str = m.group(1)
+            e_str = m.group(2)
+            step_hours = int(m.group(3)) if m.group(3) else 1
+            dt_start = datetime.strptime(s_str, "%Y%m%d%H")
+            dt_end = datetime.strptime(e_str, "%Y%m%d%H")
+            curr = dt_start
+            while curr <= dt_end:
+                cycles.append(curr.strftime("%Y%m%d%H"))
+                curr += timedelta(hours=step_hours)
+        elif re.match(r"^\d{10}$", s):
+            cycles.append(s)
+        else:
+            raise ValueError(f"Invalid cycle specification: {item}")
+
+    # Deduplicate while preserving order
+    seen = set()
+    res = []
+    for c in cycles:
+        if c not in seen:
+            seen.add(c)
+            res.append(c)
+    return res
+
+
+def cleanup_empty_directories(root_dir: Path) -> int:
+    """
+    Recursively removes empty directories under root_dir bottom-up.
+    Also removes root_dir itself if it contains no files.
+    Returns the count of removed empty directories.
+    """
+    removed_count = 0
+    if not root_dir.exists() or not root_dir.is_dir():
+        return 0
+
+    for dirpath, dirnames, filenames in os.walk(str(root_dir), topdown=False):
+        d = Path(dirpath)
+        try:
+            # Check items in directory (ignoring .DS_Store)
+            items = [item for item in d.iterdir() if item.name != ".DS_Store"]
+            if not items:
+                # Remove leftover .DS_Store files first if any
+                for item in d.iterdir():
+                    try:
+                        item.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                d.rmdir()
+                removed_count += 1
+        except OSError:
+            pass
+
+    return removed_count
+
+
+def stream_tar_pull(
+    username: str,
+    port: int,
+    tasks: List[Tuple[str, Path]],
+    cluster: str = "HPC",
+    debug: bool = False,
+) -> Tuple[int, int, int]:
+    """
+    Downloads remote files using a single streaming tar session over SSH.
+    - Sends all remote file paths to remote `tar -P -cf - --null -T -` via stdin.
+    - Reads the incoming byte stream locally via `tarfile.open(mode='r|*')`.
+    - Directly writes each member file to its target destination folder.
+    - Missing files are ignored by remote tar and recorded as missing locally.
+    Returns (completed_count, missing_count, error_count).
+    """
+    if not tasks:
+        return 0, 0, 0
+
+    path_map: Dict[str, Path] = {r.lstrip("/"): l for r, l in tasks}
+    norm_to_remote: Dict[str, str] = {r.lstrip("/"): r for r, _ in tasks}
+    received_remote_paths: set = set()
+    total_tasks = len(tasks)
+
+    # Pack paths separated by null byte \0 for tar --null -T -
+    path_data = ("\0".join(r for r, _ in tasks) + "\0").encode("utf-8")
+
+    cmd = [
+        "ssh",
+        "-p", str(port),
+        "-o", "BatchMode=yes",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "LogLevel=ERROR",
+        f"{username}@localhost",
+        "tar -P -cf - --null -T -",
+    ]
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    # Feeder thread: writes paths to stdin and closes it
+    def feed_stdin():
+        try:
+            if proc.stdin:
+                proc.stdin.write(path_data)
+                proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+
+    t_in = threading.Thread(target=feed_stdin, daemon=True)
+    t_in.start()
+
+    # Stderr reader thread: drains stderr to prevent pipe buffer deadlock
+    stderr_lines: List[str] = []
+
+    def drain_stderr():
+        try:
+            if proc.stderr:
+                for line in iter(proc.stderr.readline, b""):
+                    clean = line.decode("utf-8", errors="ignore").strip()
+                    if clean:
+                        stderr_lines.append(clean)
+        except Exception:
+            pass
+
+    t_err = threading.Thread(target=drain_stderr, daemon=True)
+    t_err.start()
+
+    completed = 0
+    errors = 0
+
+    try:
+        if proc.stdout:
+            with tarfile.open(fileobj=proc.stdout, mode="r|*") as tar_stream:
+                for member in tar_stream:
+                    if not member.isfile():
+                        continue
+                    norm = member.name.lstrip("/")
+                    dest = path_map.get(norm)
+                    if not dest:
+                        continue
+
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        fin = tar_stream.extractfile(member)
+                        if fin:
+                            with dest.open("wb") as fout:
+                                shutil.copyfileobj(fin, fout, length=64 * 1024)
+                            if dest.exists() and dest.stat().st_size > 0:
+                                completed += 1
+                                orig_r = norm_to_remote.get(norm, norm)
+                                received_remote_paths.add(orig_r)
+                            elif dest.exists() and dest.stat().st_size == 0:
+                                dest.unlink(missing_ok=True)
+                    except Exception as e:
+                        errors += 1
+                        if debug:
+                            print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+
+                    total_done = completed + errors
+                    if total_done % 10 == 0 or total_done == total_tasks:
+                        pct = int(100 * total_done / total_tasks)
+                        print(f"  Progress: {total_done}/{total_tasks} ({pct}%) [{completed} ok]", flush=True)
+
+    except tarfile.ReadError:
+        # Happens if stream is empty (i.e. all files were missing on remote)
+        pass
+    except (subprocess.SubprocessError, OSError) as e:
+        if completed == 0:
+            errors += 1
+            print(f"[!] Error reading tar stream: {e}", file=sys.stderr)
+    finally:
+        t_in.join(timeout=3.0)
+        t_err.join(timeout=3.0)
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    missing_tasks = [(r, l) for r, l in tasks if r not in received_remote_paths]
+    missing = len(missing_tasks)
+
+    # In debug mode, list missing files
+    if debug and missing > 0:
+        for r_path, _ in missing_tasks:
+            print(f"  [DEBUG] Missing on {cluster}: {Path(r_path).name}\n          Remote path: {r_path}", file=sys.stderr)
+
+    if debug and stderr_lines:
+        unexpected = [
+            line for line in stderr_lines
+            if "Cannot stat: No such file or directory" not in line
+            and "Error exit delayed" not in line
+            and "Removing leading" not in line
+        ]
+        if unexpected:
+            print(f"\n[DEBUG] Remote stderr output:", file=sys.stderr)
+            for u in unexpected[:10]:
+                print(f"  {u}", file=sys.stderr)
+
+    return completed, missing, errors
+
+
+def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str, str, int, str, str, List[Tuple[str, Path]]]:
+    """
+    Builds the list of (remote_path, local_path) tuples from recipe configuration.
+    Supports top-level 'cycle' and 'fhr' defaults and per-graphic Style B overrides.
+    Returns (hpc_cluster, username, port, expname, prefix, tasks).
+    """
+    comroot_raw = str(recipe.get("COMROOT", "")).strip()
+    if not comroot_raw:
+        raise ValueError("Missing 'COMROOT' in recipe.")
+
+    if ":" in comroot_raw:
+        hpc_cluster, remote_comroot = comroot_raw.split(":", 1)
+        hpc_cluster = hpc_cluster.strip().lower()
+        remote_comroot = remote_comroot.strip()
+    else:
+        hpc_cluster = "localhost"
+        remote_comroot = comroot_raw
+
+    # Check HPC config & connection info
+    hpc_configs = load_hpc_config()
+    c_info = hpc_configs.get(hpc_cluster, {})
+    username = c_info.get("username", "")
+    port = c_info.get("my_local_port", 0)
+
+    expname = extract_expname(remote_comroot)
+
+    # Prefix: use explicit if specified, otherwise auto-detect from COMROOT
+    raw_prefix = recipe.get("prefix")
+    if raw_prefix:
+        prefix = str(raw_prefix).strip()
+    else:
+        prefix = detect_prefix(remote_comroot, username, port)
+
+    # Default WGF list
+    raw_wgf = recipe.get("WGF", ["det"])
+    default_wgf_list = raw_wgf if isinstance(raw_wgf, list) else [raw_wgf]
+    default_wgf_list = [str(x).strip() for x in default_wgf_list if str(x).strip()]
+
+    # Default tile list
+    raw_tile = recipe.get("tile", ["full"])
+    default_tile_list = raw_tile if isinstance(raw_tile, list) else [raw_tile]
+    default_tile_list = [str(x).strip() for x in default_tile_list if str(x).strip()]
+
+    # Default cycles and fhr from top-level "cycle:" and "fhr:"
+    default_cycle_raw = recipe.get("cycle")
+    if default_cycle_raw is None:
+        def_cf = recipe.get("cycle and fhr") or recipe.get("cycle_and_fhr") or {}
+        if isinstance(def_cf, dict):
+            default_cycle_raw = def_cf.get("cycle")
+
+    default_fhr_raw = recipe.get("fhr")
+    if default_fhr_raw is None:
+        def_cf = recipe.get("cycle and fhr") or recipe.get("cycle_and_fhr") or {}
+        if isinstance(def_cf, dict):
+            default_fhr_raw = def_cf.get("fhr")
+    if default_fhr_raw is None:
+        default_fhr_raw = [0]
+
+    default_cycles = parse_cycle_list(default_cycle_raw) if default_cycle_raw else []
+    default_fhr_cfg = parse_fhr_config(default_fhr_raw)
+
+    # Graphics list from "graphics list" or legacy "graphics name template"
+    raw_graphics = (
+        recipe.get("graphics list")
+        or recipe.get("graphics_list")
+        or recipe.get("graphics name template")
+        or recipe.get("graphics_name_template")
+        or []
+    )
+    if isinstance(raw_graphics, str):
+        raw_graphics = [raw_graphics]
+    if not raw_graphics:
+        raise ValueError("No 'graphics list' specified in recipe.")
+
+    tasks: List[Tuple[str, Path]] = []
+    clean_comroot = remote_comroot.rstrip("/")
+
+    for item in raw_graphics:
+        item_template = None
+        item_cycles = default_cycles
+        item_fhr_cfg = default_fhr_cfg
+        item_wgf_list = default_wgf_list
+        item_tile_list = default_tile_list
+
+        if isinstance(item, str):
+            item_template = item.strip()
+        elif isinstance(item, dict):
+            # Style B: dictionary where key is the template name and value is the override dictionary
+            for k, v in item.items():
+                item_template = str(k).strip()
+                if isinstance(v, dict):
+                    if "cycle" in v:
+                        item_cycles = parse_cycle_list(v["cycle"])
+                    if "fhr" in v:
+                        item_fhr_cfg = parse_fhr_config(v["fhr"])
+                    if "WGF" in v or "wgf" in v:
+                        w_val = v.get("WGF") or v.get("wgf")
+                        w_list = w_val if isinstance(w_val, list) else [w_val]
+                        item_wgf_list = [str(x).strip() for x in w_list if str(x).strip()]
+                    if "tile" in v:
+                        t_val = v["tile"]
+                        t_list = t_val if isinstance(t_val, list) else [t_val]
+                        item_tile_list = [str(x).strip() for x in t_list if str(x).strip()]
+                break
+
+        if not item_template:
+            continue
+
+        # Normalize .pg to .png
+        t_norm = re.sub(r"\.pg$", ".png", item_template, flags=re.IGNORECASE)
+
+        for cyc_str in item_cycles:
+            pdy = cyc_str[:8]
+            cyc = cyc_str[8:10]
+            fhrs = resolve_fhrs_for_cycle(item_fhr_cfg, cyc_str)
+            for wgf in item_wgf_list:
+                for tile in item_tile_list:
+                    for fhr in fhrs:
+                        valid_time = f"{pdy}{cyc}{fhr:02d}"
+                        fhr_3d = f"{fhr:03d}"
+                        fname = (
+                            t_norm.replace("{tile}", tile)
+                            .replace("{TILE}", tile)
+                            .replace("{fhr}", fhr_3d)
+                            .replace("{FHR}", fhr_3d)
+                        )
+                        rem_path = (
+                            f"{clean_comroot}/{prefix}.{pdy}/{cyc}/graphics/{wgf}/{tile}/{valid_time}/{fname}"
+                        )
+                        local_path = output_base / expname / wgf / tile / cyc_str / fname
+                        tasks.append((rem_path, local_path))
+
+    return hpc_cluster, username, port, expname, prefix, tasks
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Download selected pygraf graphics from NOAA RDHPCS over SSH tunnel.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "recipe",
+        type=Path,
+        help="Path to graphics download recipe YAML (e.g. recipes/download_pgraf_graphics.yaml)",
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        type=Path,
+        default=Path("graphics"),
+        help="Base output directory (default: ./graphics)",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Re-download files even if already present locally",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List all planned downloads without transferring any files",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print verbose transfer details, including missing or uncopied files",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+
+    recipe_path = args.recipe
+    if not recipe_path.is_file():
+        # Check inside recipes/
+        cand = ROOT / "recipes" / recipe_path.name
+        if cand.is_file():
+            recipe_path = cand
+        else:
+            print(f"Error: Recipe file not found: {args.recipe}", file=sys.stderr)
+            return 1
+
+    recipe = load_recipe_yaml(recipe_path)
+    if not recipe:
+        print(f"Error: Empty or invalid recipe in {recipe_path}", file=sys.stderr)
+        return 1
+
+    try:
+        cluster, username, port, expname, prefix, tasks = build_download_list(recipe, args.output_dir)
+    except Exception as e:
+        print(f"Error parsing recipe: {e}", file=sys.stderr)
+        return 1
+
+    print("=" * 70)
+    print(f"[*] PYGRAF GRAPHICS DOWNLOAD: {expname}")
+    print(f"[*] Cluster:       {cluster}")
+    print(f"[*] Prefix:        {prefix}")
+    print(f"[*] Recipe:        {recipe_path.name}")
+    print(f"[*] Local Target:  {args.output_dir / expname}")
+    print(f"[*] Total Targets: {len(tasks)} files")
+    if args.debug:
+        print(f"[*] Debug Mode:    ENABLED")
+    print("=" * 70)
+
+    if args.debug:
+        raw_fhr = recipe.get("fhr")
+        if raw_fhr is None:
+            def_cf = recipe.get("cycle and fhr") or {}
+            raw_fhr = def_cf.get("fhr") if isinstance(def_cf, dict) else [0]
+        fhr_cfg = parse_fhr_config(raw_fhr)
+        print("\n[DEBUG] Default forecast lead hours (fhr) breakdown:")
+        if fhr_cfg.get("legacy") is not None:
+            print(f"  - All cycles: {len(fhr_cfg['legacy'])} leads: {fhr_cfg['legacy']}")
+        else:
+            for h_set, f_list in fhr_cfg.get("specific", []):
+                h_str = ",".join(f"{h:02d}" for h in sorted(h_set))
+                print(f"  - Cycles [{h_str}]: {len(f_list)} lead(s) (F{f_list[0]:03d}-F{f_list[-1]:03d})")
+            if fhr_cfg.get("default") is not None:
+                def_list = fhr_cfg["default"]
+                print(f"  - Default cycles: {len(def_list)} lead(s) (F{def_list[0]:03d}-F{def_list[-1]:03d})")
+
+    if args.dry_run:
+        limit = len(tasks) if args.debug else 20
+        print("\n[DRY RUN] Planned remote -> local file targets:")
+        for r_path, l_path in tasks[:limit]:
+            print(f"  {r_path}\n    -> {l_path}")
+        if len(tasks) > limit:
+            print(f"  ... and {len(tasks) - limit} more files (use --debug to display all).")
+        print(f"\n[✓] Dry run completed for {len(tasks)} files.")
+        return 0
+
+    # Verify cluster connection
+    if not username or not port:
+        print(f"\n[!] Error: Cluster '{cluster}' is not configured in .hpc_config.", file=sys.stderr)
+        return 1
+
+    if args.debug:
+        print(f"\n[*] [DEBUG] Verifying SSH tunnel access: {username}@localhost:{port}...")
+
+    if not test_local_access(username, port):
+        print("\n" + "=" * 70, file=sys.stderr)
+        print(f"[!] Local SSH connection to '{cluster}' is not ready (localhost:{port}).", file=sys.stderr)
+        print("[!] Please establish the SSH tunnel first in your terminal:", file=sys.stderr)
+        print(f"        ush/ssh_helper.py {cluster}", file=sys.stderr)
+        print("    and then rerun.", file=sys.stderr)
+        print("=" * 70 + "\n", file=sys.stderr)
+        return 1
+
+    # Filter out already existing files unless --update
+    pending_tasks = []
+    already_cached = 0
+    for r_path, l_path in tasks:
+        if not args.update and l_path.exists() and l_path.stat().st_size > 0:
+            already_cached += 1
+        else:
+            pending_tasks.append((r_path, l_path))
+
+    if already_cached > 0:
+        print(f"[*] Local cache: {already_cached} file(s) already exist (skipped).")
+
+    if not pending_tasks:
+        print(f"[✓] All {len(tasks)} files are already downloaded and cached locally!")
+        return 0
+
+    print(f"[*] Starting download of {len(pending_tasks)} file(s) via streaming tar over SSH...\n")
+
+    completed = 0
+    missing = 0
+    failed = 0
+    t0 = time.time()
+
+    try:
+        completed, missing, failed = stream_tar_pull(
+            username=username,
+            port=port,
+            tasks=pending_tasks,
+            cluster=cluster,
+            debug=args.debug,
+        )
+    finally:
+        # Remove all empty directories if no files downloaded in them
+        removed_count = cleanup_empty_directories(args.output_dir / expname)
+        if args.debug and removed_count > 0:
+            print(f"\n[*] [DEBUG] Cleaned up {removed_count} empty directory(ies).")
+        try:
+            if args.output_dir.exists() and not any(args.output_dir.iterdir()):
+                args.output_dir.rmdir()
+                if args.debug:
+                    print(f"[*] [DEBUG] Removed base directory {args.output_dir} as it is empty.")
+        except OSError:
+            pass
+
+    elapsed = time.time() - t0
+    target_exp_dir = args.output_dir / expname
+    print("\n" + "=" * 70)
+    print(f"[✓] Completed in {elapsed:.1f}s")
+    print(f"    - Downloaded:  {completed}")
+    print(f"    - Already had: {already_cached}")
+    if args.debug and missing > 0:
+        print(f"    - Missing:     {missing}")
+    if failed > 0:
+        print(f"    - Errors:      {failed}")
+    if target_exp_dir.exists():
+        print(f"    - Directory:   {target_exp_dir}")
+    else:
+        print(f"    - Directory:   (no files downloaded; empty directory removed)")
+    print("=" * 70)
+
+    return 0 if failed == 0 else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

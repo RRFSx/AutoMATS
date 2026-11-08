@@ -1775,8 +1775,8 @@ class SlideTests(unittest.TestCase):
             self.assertEqual(path, output / "slides.pptx")
             deck = Presentation(path)
             self.assertAlmostEqual(deck.slide_width / deck.slide_height, 16 / 9, places=6)
-            self.assertEqual(len(deck.slides), 1)
-            slide = deck.slides[0]
+            self.assertEqual(len(deck.slides), 2)
+            slide = deck.slides[1]
             self.assertEqual(slide.shapes[0].text, "Upper Air Verification")
             pictures = [shape for shape in slide.shapes if shape.shape_type == MSO_SHAPE_TYPE.PICTURE]
             self.assertEqual([shape.name for shape in pictures],
@@ -1816,14 +1816,14 @@ class SlideTests(unittest.TestCase):
             self.save_figures(output)
             Image.new("RGB", (1200, 1260), "red").save(output / plan.jobs[0].relative_path)
             deck = Presentation(build_slides(plan, output))
-            self.assertEqual(len(deck.slides), 2)
-            self.assertEqual(deck.slides[1].shapes[0].text, "Profiles")
-            profile, landscape = [shape for shape in deck.slides[1].shapes
+            self.assertEqual(len(deck.slides), 3)
+            self.assertEqual(deck.slides[2].shapes[0].text, "Profiles")
+            profile, landscape = [shape for shape in deck.slides[2].shapes
                                   if shape.shape_type == MSO_SHAPE_TYPE.PICTURE]
             self.assertAlmostEqual(profile.width / profile.height, 1200 / 1260, places=5)
             self.assertAlmostEqual(landscape.width / landscape.height, 1600 / 960, places=5)
             self.assertGreaterEqual(landscape.left, profile.left + profile.width)
-            self.assertEqual([shape.text for shape in deck.slides[1].shapes
+            self.assertEqual([shape.text for shape in deck.slides[2].shapes
                               if shape.name.startswith("Caption ")], ["T", "RHobT"])
 
     def test_missing_corrupt_or_non_png_figures_preserve_previous_deck(self):
@@ -1897,13 +1897,15 @@ class SlideTests(unittest.TestCase):
         self.assertIn("1 slides: custom figures/slides.pptx", output.getvalue())
 
     def test_slides_only_requires_configuration_and_rejects_limit(self):
-        with patch("automats.cli.load_plan", return_value=replace(self.plan, slides=())), \
-            patch("automats.cli.run_plan") as execute, redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-            self.assertEqual(main(["recipe.yaml", "--slides-only"]), 1)
-        execute.assert_not_called()
-        with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as result:
-            main(["recipe.yaml", "--slides-only", "--limit", "1"])
-        self.assertEqual(result.exception.code, 2)
+        for flag in ("--slides-only", "--slide-only"):
+            with self.subTest(flag=flag):
+                with patch("automats.cli.load_plan", return_value=replace(self.plan, slides=())), \
+                    patch("automats.cli.run_plan") as execute, redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                    self.assertEqual(main(["recipe.yaml", flag]), 1)
+                execute.assert_not_called()
+                with redirect_stderr(StringIO()), self.assertRaises(SystemExit) as result:
+                    main(["recipe.yaml", flag, "--limit", "1"])
+                self.assertEqual(result.exception.code, 2)
 
     def test_invalid_slide_references_only_stop_slide_generation(self):
         plan = replace(self.plan, slides=(), slide_error="slide 1: ambiguous figure 'T'")
@@ -1999,7 +2001,7 @@ class CliTests(unittest.TestCase):
             self.assertTrue(execute.call_args.kwargs["update"])
 
     def test_update_rejects_slides_only_and_metadata_only(self):
-        for flag in ("--slides-only", "--metadata-only"):
+        for flag in ("--slides-only", "--slide-only", "--metadata-only"):
             with self.subTest(flag=flag), redirect_stderr(StringIO()), self.assertRaises(SystemExit) as result:
                 main([str(self.recipe), "--update", flag])
             self.assertEqual(result.exception.code, 2)

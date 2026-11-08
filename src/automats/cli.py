@@ -1,5 +1,7 @@
 """Command-line planning and sequential plot generation."""
 
+from __future__ import annotations
+
 import argparse
 import math
 from pathlib import Path
@@ -104,7 +106,8 @@ def main(argv=None) -> int:
     parser.add_argument("--plan", action="store_true", help="List filenames without opening a browser or contacting MATS")
     local_mode = parser.add_mutually_exclusive_group()
     local_mode.add_argument("--metadata-only", action="store_true", help="Add metadata to older cached figures locally; never contact MATS")
-    local_mode.add_argument("--slides-only", action="store_true", help="Build slides from existing PNG figures; never contact MATS")
+    local_mode.add_argument("--slides-only", "--slide-only", dest="slides_only", action="store_true",
+                            help="Build slides from existing PNG figures; never contact MATS")
     parser.add_argument("--update", action="store_true",
                         help="Regenerate all figures even if they already exist in the output directory")
     parser.add_argument("--limit", type=int, help="Generate at most this many figures")
@@ -132,12 +135,14 @@ def main(argv=None) -> int:
                 print(args.output_dir / job.relative_path)
             if plan.slides:
                 print(f"{len(plan.slides)} slides: {args.output_dir / 'slides.pptx'}")
+            if plan.pygraf_graphics and plan.pygraf_graphics.enable:
+                print(f"pygraf graphics slides enabled ({plan.pygraf_graphics.recipe}): {args.output_dir / 'slides.pptx'}")
             if plan.slide_error is not None:
                 print(f"Warning: Slide generation disabled: {plan.slide_error}", file=sys.stderr)
             return 0
         if args.slides_only:
             deck = build_slides(plan, args.output_dir)
-            print(f"Saved {len(plan.slides)} slides to {deck.resolve()}", flush=True)
+            print(f"Saved slides to {deck.resolve()}", flush=True)
             return 0
         deck = None
         with ProgressDisplay(len(plan.jobs)) as progress:
@@ -145,18 +150,18 @@ def main(argv=None) -> int:
                      metadata_only=args.metadata_only, show_browser=args.show_browser,
                      update=args.update,
                      log=progress.log, status=progress.update)
-            if plan.slides or plan.slide_error is not None:
+            if plan.slides or (plan.pygraf_graphics and plan.pygraf_graphics.enable) or plan.slide_error is not None:
                 if not args.metadata_only and args.limit is not None and args.limit < len(plan.jobs):
                     progress.log("Slides skipped for a partial --limit run; use --slides-only to build from existing PNGs")
                 else:
-                    progress.update(f"Building {len(plan.slides)} PowerPoint slides")
+                    progress.update("Building PowerPoint slides")
                     try:
                         deck = build_slides(plan, args.output_dir)
                     except Exception as error:
                         progress.log(f"Warning: Slide generation failed: {error}. Saved figures are retained.")
         print(f"Saved {count} figures under {args.output_dir.resolve()}", flush=True)
         if deck is not None:
-            print(f"Saved {len(plan.slides)} slides to {deck.resolve()}", flush=True)
+            print(f"Saved slides to {deck.resolve()}", flush=True)
         return 0
     except KeyboardInterrupt:
         print("Interrupted. Completed figures are retained for resume.", file=sys.stderr)

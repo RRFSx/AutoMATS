@@ -8,8 +8,8 @@ graphics slides:
   graphics name: cref_full_sfc_f006.png
   cycle: 2024050700
   number of rows: 2
-  row1: [obs]
-  row2: [first, second]
+  row1: [first, second]
+  row2: [obs]
 
 - type: same cycle
   title: Composite Reflectivity
@@ -17,5 +17,5 @@ graphics slides:
   experiment: second
   cycle: 2024050700
   number of rows: 2
-  row1: [obs, cref_full_sfc_f001.pg]
-  row2: [obs, cref_full_sfc_f002.pg]
+  row1: [cref_full_sfc_f001.pg, obs]
+  row2: [cref_full_sfc_f002.pg, obs]

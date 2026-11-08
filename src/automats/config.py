@@ -210,6 +210,7 @@ class Plan:
     pygraf_graphics: PygrafGraphicsConfig | None = None
     experiments: tuple[Experiment, ...] = ()
     recipe_path: Path | None = None
+    title: str | None = None
 
 
 def _mapping(value: Any, context: str) -> dict:
@@ -619,6 +620,8 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
         recipe_str = _text(recipe_val, "pygraf graphics slides.recipe") if recipe_val is not None else None
         pygraf_cfg = PygrafGraphicsConfig(enable=enable, recipe=recipe_str)
 
+    recipe_title = _text(raw["title"], "title") if "title" in raw and raw["title"] is not None else None
+
     return Plan(
         planned_jobs,
         tuple(notices),
@@ -628,4 +631,5 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
         pygraf_graphics=pygraf_cfg,
         experiments=tuple(experiments),
         recipe_path=recipe_path,
+        title=recipe_title,
     )

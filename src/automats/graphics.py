@@ -779,25 +779,43 @@ def process_graphics_slides(
 
         slide = deck.slides.add_slide(deck.slide_layouts[6])
 
-        # Title text
+        # Smartly wrap and structure title to avoid overlay with [ ⌂ Overview ] button
         if "valid" in slide_type:
             g_name = spec.get("graphics name", "")
             clean_name, tile, fhr = parse_graphics_name(g_name)
-            title_text = f"{title} - Cycle: {cycle} F{fhr:03d}"
+            title_line1 = title
+            title_line2 = f"Cycle: {cycle} F{fhr:03d}"
         else:
             exp_ref = spec.get("experiment", "first")
             exp_obj = resolve_experiment(exp_ref, plan.experiments)
             exp_name = exp_obj.name if exp_obj else exp_ref
-            title_text = f"{title} - {exp_name} (Cycle: {cycle})"
+            title_line1 = title
+            title_line2 = f"{exp_name}   •   Cycle: {cycle}"
 
-        heading = slide.shapes.add_textbox(margin, Inches(0.18), deck.slide_width - 2 * margin, Inches(0.55))
+        # Centered heading with symmetric 1.6" margins to safely clear top-right [ ⌂ Overview ] button
+        heading_w = deck.slide_width - Inches(3.2)
+        heading_left = Inches(1.6)
+        heading = slide.shapes.add_textbox(heading_left, Inches(0.10), heading_w, Inches(0.70))
         heading.text_frame.word_wrap = True
-        heading.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
-        p = heading.text_frame.paragraphs[0]
-        p.text = title_text
-        p.alignment = PP_ALIGN.CENTER
-        p.font.size = Pt(22)
-        p.font.bold = True
+        heading.text_frame.margin_top = heading.text_frame.margin_bottom = 0
+        heading.text_frame.margin_left = heading.text_frame.margin_right = 0
+
+        p1 = heading.text_frame.paragraphs[0]
+        p1.text = title_line1
+        p1.alignment = PP_ALIGN.CENTER
+        p1.font.size = Pt(19)
+        p1.font.bold = True
+
+        p2 = heading.text_frame.add_paragraph()
+        p2.text = title_line2
+        p2.alignment = PP_ALIGN.CENTER
+        p2.font.size = Pt(12.5)
+        p2.font.bold = True
+        try:
+            from pptx.dml.color import RGBColor
+            p2.font.color.rgb = RGBColor(70, 85, 105)
+        except Exception:
+            pass
 
         row_gap = Inches(0.15)
         row_height = (avail_height - row_gap * (len(rows_data) - 1)) // len(rows_data)

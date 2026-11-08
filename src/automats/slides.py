@@ -18,18 +18,42 @@ class SlideError(ValueError):
 
 
 NAMED_COLORS: Dict[str, Tuple[int, int, int]] = {
-    "red": (214, 39, 40),
-    "blue": (31, 119, 180),
-    "orange": (255, 127, 14),
-    "green": (44, 160, 44),
-    "purple": (148, 103, 189),
-    "brown": (140, 86, 75),
-    "pink": (227, 119, 194),
-    "gray": (127, 127, 127),
-    "grey": (127, 127, 127),
-    "black": (20, 20, 20),
-    "cyan": (23, 190, 207),
-    "olive": (188, 189, 34),
+    # Standard MATS / CSS curve colors
+    "red": (255, 0, 0),
+    "blue": (0, 0, 255),
+    "orange": (255, 165, 0),
+    "green": (0, 128, 0),
+    "lime": (0, 255, 0),
+    "purple": (128, 0, 128),
+    "magenta": (255, 0, 255),
+    "fuchsia": (255, 0, 255),
+    "cyan": (0, 255, 255),
+    "aqua": (0, 255, 255),
+    "teal": (0, 128, 128),
+    "yellow": (255, 255, 0),
+    "gold": (255, 215, 0),
+    "brown": (165, 42, 42),
+    "pink": (255, 192, 203),
+    "gray": (128, 128, 128),
+    "grey": (128, 128, 128),
+    "black": (0, 0, 0),
+    "white": (255, 255, 255),
+    "olive": (128, 128, 0),
+    "navy": (0, 0, 128),
+    "maroon": (128, 0, 0),
+    "violet": (238, 130, 238),
+    "darkorange": (255, 140, 0),
+    "coral": (255, 127, 80),
+    "indigo": (75, 0, 130),
+    "turquoise": (64, 224, 208),
+    "dodgerblue": (30, 144, 255),
+    "royalblue": (65, 105, 225),
+    "steelblue": (70, 130, 180),
+    "forestgreen": (34, 139, 34),
+    "darkgreen": (0, 100, 0),
+    "darkblue": (0, 0, 139),
+    "darkred": (139, 0, 0),
+    "crimson": (220, 20, 60),
 }
 
 PREFERRED_SECTIONS = [
@@ -299,6 +323,10 @@ def populate_overview_slide(
             ep1.font.size = Pt(13)
             ep1.font.bold = True
             ep1.font.color.rgb = c_rgb
+            for r in ep1.runs:
+                r.font.size = Pt(13)
+                r.font.bold = True
+                r.font.color.rgb = c_rgb
 
             details = []
             if exp.hpc_cluster:
@@ -310,12 +338,18 @@ def populate_overview_slide(
             ep2.text = "   •   ".join(details)
             ep2.font.size = Pt(9.5)
             ep2.font.color.rgb = RGBColor(90, 100, 115)
+            for r in ep2.runs:
+                r.font.size = Pt(9.5)
+                r.font.color.rgb = RGBColor(90, 100, 115)
 
             if exp.remote_comroot:
                 ep3 = etf.add_paragraph()
                 ep3.text = f"COMROOT: {exp.remote_comroot}"
                 ep3.font.size = Pt(8.5)
                 ep3.font.color.rgb = RGBColor(115, 125, 140)
+                for r in ep3.runs:
+                    r.font.size = Pt(8.5)
+                    r.font.color.rgb = RGBColor(115, 125, 140)
     else:
         etb = overview_slide.shapes.add_textbox(left_x + Inches(0.3), card_top + Inches(0.7), left_w - Inches(0.6), Inches(1.0))
         ep = etb.text_frame.paragraphs[0]

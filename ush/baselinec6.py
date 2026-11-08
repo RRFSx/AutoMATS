@@ -102,10 +102,10 @@ def main(argv=None):
     }
 
     base_exp = dict(existing_by_name.get(BASELINE_EXPERIMENT, {"name": BASELINE_EXPERIMENT}))
-    base_exp["color"] = "blue"
+    base_exp["color"] = "red"
 
     target_exp = dict(existing_by_name.get(expname, {"name": expname}))
-    target_exp["color"] = "red"
+    target_exp["color"] = "blue"
     if comroot:
         target_exp["COMROOT"] = comroot
 

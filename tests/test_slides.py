@@ -107,7 +107,25 @@ class SlidesOverviewTests(unittest.TestCase):
 
     def test_parse_color_to_rgb(self):
         c1 = parse_color_to_rgb("red")
-        self.assertEqual((c1[0], c1[1], c1[2]), (214, 39, 40))
+        self.assertEqual((c1[0], c1[1], c1[2]), (255, 0, 0))
+
+        c_blue = parse_color_to_rgb("blue")
+        self.assertEqual((c_blue[0], c_blue[1], c_blue[2]), (0, 0, 255))
+
+        c_orange = parse_color_to_rgb("orange")
+        self.assertEqual((c_orange[0], c_orange[1], c_orange[2]), (255, 165, 0))
+
+        c_green = parse_color_to_rgb("green")
+        self.assertEqual((c_green[0], c_green[1], c_green[2]), (0, 128, 0))
+
+        c_magenta = parse_color_to_rgb("magenta")
+        self.assertEqual((c_magenta[0], c_magenta[1], c_magenta[2]), (255, 0, 255))
+
+        c_teal = parse_color_to_rgb("teal")
+        self.assertEqual((c_teal[0], c_teal[1], c_teal[2]), (0, 128, 128))
+
+        c_black = parse_color_to_rgb("black")
+        self.assertEqual((c_black[0], c_black[1], c_black[2]), (0, 0, 0))
 
         c2 = parse_color_to_rgb("#ff0000")
         self.assertEqual((c2[0], c2[1], c2[2]), (255, 0, 0))

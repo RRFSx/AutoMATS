@@ -2063,7 +2063,7 @@ class SlideTests(unittest.TestCase):
                 code = main(["recipe.yaml", "--output-dir", str(output)])
 
             self.assertEqual(code, 0)
-            self.assertIn("Saved 2 figures under", out_buf.getvalue())
+            self.assertIn("Saved 2 MATS figures under", out_buf.getvalue())
             self.assertIn("Saved slides to", out_buf.getvalue())
             self.assertIn("Skipped 1 failed MATS plot(s):", err_buf.getvalue())
             self.assertIn(self.plan.jobs[0].relative_path, err_buf.getvalue())
@@ -2120,7 +2120,7 @@ class SlideTests(unittest.TestCase):
             self.assertEqual(main(["recipe.yaml", "--plan"]), 0)
             execute.assert_not_called()
         self.assertIn("Slide generation failed: slide 1: ambiguous figure", messages.getvalue())
-        self.assertIn("Saved 3 figures", messages.getvalue())
+        self.assertIn("Saved 3 MATS figures", messages.getvalue())
         self.assertIn("Slide generation disabled", messages.getvalue())
 
     def test_slide_save_errors_do_not_fail_a_successful_plot_run(self):
@@ -2132,7 +2132,35 @@ class SlideTests(unittest.TestCase):
                 redirect_stdout(messages), redirect_stderr(messages):
                 self.assertEqual(main(["recipe.yaml"]), 0)
             self.assertIn("Slide generation failed", messages.getvalue())
-            self.assertIn("Saved 3 figures", messages.getvalue())
+            self.assertIn("Saved 3 MATS figures", messages.getvalue())
+
+    def test_cli_reports_mats_figures_and_graphics_counts_separately(self):
+        from automats.config import PygrafGraphicsConfig
+
+        pygraf_plan = replace(
+            self.plan,
+            pygraf_graphics=PygrafGraphicsConfig(enable=True, recipe="graphics.yaml"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+
+            def fake_build_slides(plan, out_dir, *, log=None, missing=None, graphics_stats=None):
+                if graphics_stats is not None:
+                    graphics_stats["saved"] = 2
+                return out_dir / "slides.pptx"
+
+            out_buf = StringIO()
+            with patch("automats.cli.load_plan", return_value=pygraf_plan), \
+                    patch("automats.cli.run_plan", return_value=0), \
+                    patch("automats.cli.build_slides", side_effect=fake_build_slides), \
+                    redirect_stdout(out_buf):
+                code = main(["recipe.yaml", "--output-dir", str(output)])
+
+            self.assertEqual(code, 0)
+            text = out_buf.getvalue()
+            self.assertIn(f"Saved 0 MATS figures under {output.resolve()}", text)
+            self.assertIn(f"Saved 2 graphics under {(output / 'graphics').resolve()}", text)
+            self.assertIn(f"Saved slides to {(output / 'slides.pptx').resolve()}", text)
 
 
 class CliTests(unittest.TestCase):

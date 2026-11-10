@@ -7,7 +7,7 @@ import sys
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "ush"))
 
-from download_pgraf_graphics import (
+from download_pygraf_graphics import (
     build_download_list,
     cleanup_empty_directories,
     detect_prefix,
@@ -75,7 +75,7 @@ class DownloadGraphicsTests(unittest.TestCase):
             "graphics name template": ["cref_{tile}_sfc_f{fhr}.png"],
         }
         out_base = Path("/local/figures")
-        cluster, user, port, expname, prefix, tasks = build_download_list(recipe, out_base)
+        cluster, user, expname, prefix, tasks = build_download_list(recipe, out_base)
 
         self.assertEqual(cluster, "gaeac6")
         self.assertEqual(expname, "RRFSv2X.retv4")
@@ -138,7 +138,7 @@ class DownloadGraphicsTests(unittest.TestCase):
             "graphics name template": ["cref_{tile}_sfc_f{fhr}.png"],
         }
         out_base = Path("/local/figures")
-        cluster, user, port, expname, prefix, tasks = build_download_list(recipe, out_base)
+        cluster, user, expname, prefix, tasks = build_download_list(recipe, out_base)
 
         # 2024050610 has 2 fhrs (0, 1) -> 2 tasks
         # 2024050700 has 3 fhrs (0, 1, 2) -> 3 tasks
@@ -235,7 +235,7 @@ class DownloadGraphicsTests(unittest.TestCase):
             mock_proc.wait = MagicMock(return_value=1)
 
             with patch("subprocess.Popen", return_value=mock_proc):
-                completed, missing, errors = stream_tar_pull("testuser", 40896, tasks, cluster="gaeac6", debug=True)
+                completed, missing, errors = stream_tar_pull("testuser", tasks, cluster="gaeac6", debug=True)
 
             self.assertEqual(completed, 2)
             self.assertEqual(missing, 1)
@@ -247,8 +247,62 @@ class DownloadGraphicsTests(unittest.TestCase):
             self.assertFalse(out_missing.exists())
 
     def test_stream_tar_pull_empty_tasks(self):
-        completed, missing, errors = stream_tar_pull("user", 1234, [])
+        completed, missing, errors = stream_tar_pull("user", [])
         self.assertEqual((completed, missing, errors), (0, 0, 0))
+
+    def test_stream_tar_pull_shared_remote_path_multiple_destinations(self):
+        from unittest.mock import patch, MagicMock
+        import io
+        import tarfile
+
+        class CapturingBytesIO(io.BytesIO):
+            def __init__(self):
+                super().__init__()
+                self.captured = b""
+
+            def close(self):
+                if not self.closed:
+                    self.captured = self.getvalue()
+                super().close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            out1 = tmp / "exp1" / "shared.png"
+            out2 = tmp / "exp2" / "shared.png"
+            miss1 = tmp / "exp1" / "missing.png"
+            miss2 = tmp / "exp2" / "missing.png"
+
+            tar_buf = io.BytesIO()
+            with tarfile.open(fileobj=tar_buf, mode="w") as tw:
+                data = b"SHARED_DATA"
+                ti = tarfile.TarInfo(name="/gpfs/path/shared.png")
+                ti.size = len(data)
+                tw.addfile(ti, io.BytesIO(data))
+            tar_buf.seek(0)
+
+            stdin_cap = CapturingBytesIO()
+            mock_proc = MagicMock()
+            mock_proc.stdin = stdin_cap
+            mock_proc.stdout = tar_buf
+            mock_proc.stderr = io.BytesIO()
+            mock_proc.wait.return_value = 0
+
+            tasks = [
+                ("/gpfs/path/shared.png", out1),
+                ("/gpfs/path/shared.png", out2),
+                ("/gpfs/path/missing.png", miss1),
+                ("/gpfs/path/missing.png", miss2),
+            ]
+
+            with patch("subprocess.Popen", return_value=mock_proc):
+                completed, missing, errors = stream_tar_pull("testuser", tasks, cluster="gaeac6", debug=True)
+
+            self.assertEqual((completed, missing, errors), (2, 2, 0))
+            self.assertEqual(stdin_cap.captured, b"/gpfs/path/shared.png\x00/gpfs/path/missing.png\x00")
+            self.assertEqual(out1.read_bytes(), b"SHARED_DATA")
+            self.assertEqual(out2.read_bytes(), b"SHARED_DATA")
+            self.assertFalse(miss1.exists())
+            self.assertFalse(miss2.exists())
 
     def test_parse_simple_yaml_nested(self):
         raw = """
@@ -296,7 +350,7 @@ graphics list:
             ],
         }
         out_base = Path("/local/figures")
-        cluster, user, port, expname, prefix, tasks = build_download_list(recipe, out_base)
+        cluster, user, expname, prefix, tasks = build_download_list(recipe, out_base)
 
         # First graphic uses default cycle 2024050600 with fhr 0, 1 -> 2 tasks
         cref_tasks = [t for t in tasks if "cref_" in str(t[1])]
@@ -340,10 +394,131 @@ graphics list:
             "graphics list": ["cref_{tile}_sfc_f{fhr}.png"],
         }
         out_base = Path("/local/figures")
-        cluster, user, port, expname, prefix, tasks = build_download_list(recipe_no_prefix, out_base)
+        cluster, user, expname, prefix, tasks = build_download_list(recipe_no_prefix, out_base)
         self.assertEqual(prefix, "hrrr")
         # Check task remote path contains auto-detected prefix 'hrrr.20240506'
         self.assertIn("hrrr.20240506", tasks[0][0])
+
+    def test_build_download_list_with_comroot_list(self):
+        raw_yaml = """
+COMROOT:
+- gaeac6:/gpfs/f6/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
+- ursa:/scratch3/BMC/OPSROOT/RRFSv2X.retv4p1/com/rrfs/v2.1.4
+WGF: [det]
+tile: [full]
+cycle: [2024050600]
+fhr: [0, 1]
+graphics list:
+- cref_{tile}_sfc_f{fhr}.png
+"""
+        recipe = parse_simple_yaml(raw_yaml)
+        out_base = Path("/local/figures")
+        cluster, user, expname, prefix, tasks = build_download_list(recipe, out_base)
+        self.assertEqual(cluster, "gaeac6, ursa")
+        self.assertEqual(expname, "RRFSv2X.retv4, RRFSv2X.retv4p1")
+        self.assertEqual(prefix, "rrfs")
+        self.assertEqual(len(tasks), 4)
+        self.assertEqual(
+            tasks[0][0],
+            "/gpfs/f6/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4/rrfs.20240506/00/graphics/det/full/202405060000/cref_full_sfc_f000.png",
+        )
+        self.assertEqual(
+            tasks[0][1],
+            out_base / "RRFSv2X.retv4" / "det" / "full" / "2024050600" / "cref_full_sfc_f000.png",
+        )
+        self.assertEqual(
+            tasks[2][0],
+            "/scratch3/BMC/OPSROOT/RRFSv2X.retv4p1/com/rrfs/v2.1.4/rrfs.20240506/00/graphics/det/full/202405060000/cref_full_sfc_f000.png",
+        )
+        self.assertEqual(
+            tasks[2][1],
+            out_base / "RRFSv2X.retv4p1" / "det" / "full" / "2024050600" / "cref_full_sfc_f000.png",
+        )
+
+    def test_main_standalone_ignores_sibling_baseline_and_downloads_comroot_list(self):
+        from unittest.mock import patch
+        import download_pygraf_graphics as dl
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            dl_yaml = tmp / "download_pygraf_graphics.yaml"
+            dl_yaml.write_text(
+                "COMROOT:\n"
+                "- gaeac6:/gpfs/f6/OPSROOT/EXP_ONE/com/rrfs/v2.1.4\n"
+                "- gaeac6:/gpfs/f6/OPSROOT/EXP_TWO/com/rrfs/v2.1.4\n"
+                "WGF: [det]\n"
+                "cycle: [2024050600]\n"
+                "fhr: [0]\n"
+                "tile: [full]\n"
+                "graphics list:\n"
+                "- cref_{tile}_sfc_f{fhr}.png\n",
+                encoding="utf-8",
+            )
+            # Sibling baseline.yaml should have no effect on standalone execution
+            base_yaml = tmp / "baseline.yaml"
+            base_yaml.write_text(
+                "experiments:\n"
+                "- name: other\n"
+                "  color: red\n"
+                "  COMROOT: gaeac6:/gpfs/f6/OPSROOT/OTHER_EXP/com/rrfs/v2.1.4\n",
+                encoding="utf-8",
+            )
+
+            out_dir = tmp / "graphics"
+            pulled_tasks = []
+
+            def fake_pull(username, tasks, cluster="HPC", debug=False):
+                pulled_tasks.extend(tasks)
+                for _, lpath in tasks:
+                    lpath.parent.mkdir(parents=True, exist_ok=True)
+                    lpath.write_bytes(b"PNGDATA")
+                return len(tasks), 0, 0
+
+            with (
+                patch.object(dl, "test_hpc_session_ready", return_value=True),
+                patch.object(dl, "stream_tar_pull", side_effect=fake_pull),
+            ):
+                rc = dl.main([str(dl_yaml), "-o", str(out_dir)])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(pulled_tasks), 2)
+            self.assertIn("/EXP_ONE/", pulled_tasks[0][0])
+            self.assertIn("/EXP_TWO/", pulled_tasks[1][0])
+            self.assertFalse((out_dir / "OTHER_EXP").exists())
+            self.assertTrue((out_dir / "EXP_ONE" / "det" / "full" / "2024050600" / "cref_full_sfc_f000.png").exists())
+            self.assertTrue((out_dir / "EXP_TWO" / "det" / "full" / "2024050600" / "cref_full_sfc_f000.png").exists())
+
+    def test_load_hpc_users_populates_download_targets(self):
+        from unittest.mock import patch
+        import download_pygraf_graphics as dl
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            cfg = tmp / ".hpc_config"
+            cfg.write_text(
+                "# RDHPCS usernames by cluster\n"
+                "gaeac6: User.Gaea\n"
+                "hera: User.Hera\n",
+                encoding="utf-8",
+            )
+            recipe = {
+                "COMROOT": [
+                    "gaeac6:/gpfs/f6/OPSROOT/EXP1/com/rrfs/v2.1.4",
+                    "hera:/scratch1/OPSROOT/EXP2/com/rrfs/v2.1.4",
+                ],
+                "WGF": ["det"],
+                "tile": ["full"],
+                "cycle": ["2024050600"],
+                "fhr": [0],
+                "graphics list": ["cref_{tile}_sfc_f{fhr}.png"],
+            }
+            with patch.object(dl, "find_hpc_config_file", return_value=cfg):
+                targets = dl.build_download_targets(recipe, tmp / "graphics")
+                _, users_str, _, _, _ = dl.build_download_list(recipe, tmp / "graphics")
+
+            self.assertEqual(targets[0]["username"], "User.Gaea")
+            self.assertEqual(targets[1]["username"], "User.Hera")
+            self.assertEqual(users_str, "User.Gaea, User.Hera")
 
 
 if __name__ == "__main__":

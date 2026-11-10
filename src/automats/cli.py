@@ -142,7 +142,18 @@ def main(argv=None) -> int:
             return 0
         if args.slides_only:
             missing_figures: list[tuple[str, str]] = []
-            deck = build_slides(plan, args.output_dir, missing=missing_figures)
+            graphics_stats: dict[str, int] = {"saved": 0}
+            deck = build_slides(
+                plan,
+                args.output_dir,
+                missing=missing_figures,
+                graphics_stats=graphics_stats,
+            )
+            if plan.pygraf_graphics and plan.pygraf_graphics.enable:
+                print(
+                    f"Saved {graphics_stats['saved']} graphics under {(args.output_dir / 'graphics').resolve()}",
+                    flush=True,
+                )
             print(f"Saved slides to {deck.resolve()}", flush=True)
             if missing_figures:
                 unique_missing = len({path for path, _ in missing_figures})
@@ -154,6 +165,7 @@ def main(argv=None) -> int:
         deck = None
         failed_plots: list[tuple[object, str]] = []
         missing_figures = []
+        graphics_stats = {"saved": 0}
         with ProgressDisplay(len(plan.jobs)) as progress:
             count = run_plan(plan, args.output_dir, args.limit, not args.show_browser,
                      metadata_only=args.metadata_only, show_browser=args.show_browser,
@@ -165,10 +177,21 @@ def main(argv=None) -> int:
                 else:
                     progress.update("Building PowerPoint slides")
                     try:
-                        deck = build_slides(plan, args.output_dir, log=progress.log, missing=missing_figures)
+                        deck = build_slides(
+                            plan,
+                            args.output_dir,
+                            log=progress.log,
+                            missing=missing_figures,
+                            graphics_stats=graphics_stats,
+                        )
                     except Exception as error:
                         progress.log(f"Warning: Slide generation failed: {error}. Saved figures are retained.")
-        print(f"Saved {count} figures under {args.output_dir.resolve()}", flush=True)
+        print(f"Saved {count} MATS figures under {args.output_dir.resolve()}", flush=True)
+        if deck is not None and plan.pygraf_graphics and plan.pygraf_graphics.enable:
+            print(
+                f"Saved {graphics_stats['saved']} graphics under {(args.output_dir / 'graphics').resolve()}",
+                flush=True,
+            )
         if failed_plots:
             print(f"Warning: Skipped {len(failed_plots)} failed MATS plot(s):", file=sys.stderr)
             for failed_job, reason in failed_plots:

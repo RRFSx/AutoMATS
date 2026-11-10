@@ -4,8 +4,8 @@ pygraf graphics slides module for AutoMATS.
 Handles:
   1. Parsing pygraf graphics layout recipes (same valid time, same cycle).
   2. Resolving experiments and COMROOT locations on HPC systems (e.g. gaeac6).
-  3. Verifying local SSH tunnel readiness; skipping and prompting users if offline.
-  4. Pulling remote graphic files via streaming tar over local SSH tunnel.
+  3. Verifying background HPC terminal session readiness; skipping and prompting users if offline.
+  4. Pulling remote graphic files via streaming tar over the background HPC terminal session.
   5. Generating OBS and missing-image placeholders.
   6. Rendering graphic slides into the presentation deck.
 """
@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -48,64 +49,111 @@ ORDINALS = {
 }
 
 
+def _resolve_ssh_helper_path() -> Path:
+    """Returns path to ush/ssh_helper.py relative to AutoMATS root."""
+    script_dir = Path(__file__).resolve().parent
+    automats_root = script_dir.parent.parent
+    return automats_root / "ush" / "ssh_helper.py"
+
+
 def find_hpc_config_file() -> Optional[Path]:
     """Finds .hpc_config path in CWD or AutoMATS repository root."""
     cwd_dot = Path.cwd() / ".hpc_config"
-    if cwd_dot.exists():
+    if cwd_dot.is_file():
         return cwd_dot
     script_dir = Path(__file__).resolve().parent
     automats_root = script_dir.parent.parent
     root_dot = automats_root / ".hpc_config"
-    if root_dot.exists():
+    if root_dot.is_file():
         return root_dot
     return None
 
 
-def load_hpc_config_dict() -> Dict[str, Dict[str, Any]]:
-    """Loads .hpc_config without external dependencies."""
-    path = find_hpc_config_file()
-    if not path or not path.exists():
+def _clean_hpc_username(value: Any) -> Optional[str]:
+    """Normalizes a configured username string, returning None if unset or placeholder."""
+    if value is None:
+        return None
+    val = str(value).strip().strip("'\"")
+    if not val or val.lower() in ("null", "none", "~", "<your_username>"):
+        return None
+    return val
+
+
+def load_hpc_users(config_path: Optional[Path] = None) -> Dict[str, str]:
+    """
+    Loads simple `<cluster>: <username>` mappings from `.hpc_config`.
+    Also tolerates legacy nested `<cluster>:\\n  username: <username>` blocks.
+    """
+    path = config_path or find_hpc_config_file()
+    if not path or not path.is_file():
         return {}
-    cfg: Dict[str, Dict[str, Any]] = {}
-    current = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.endswith(":") and ":" not in line[:-1]:
-            current = line[:-1].strip().lower()
-            cfg[current] = {}
-        elif current and ":" in line:
-            k, v = line.split(":", 1)
-            k = k.strip()
-            v = v.strip()
-            if v.lower() in ("null", "none", "~", ""):
-                cfg[current][k] = None
-            elif v.isdigit():
-                cfg[current][k] = int(v)
-            else:
-                cfg[current][k] = v
-    return cfg
-
-
-def test_hpc_local_access(username: str, local_port: int, timeout: float = 2.5) -> bool:
-    """Tests whether SSH access through localhost:<local_port> is currently active."""
-    cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", f"ConnectTimeout={int(timeout)}",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "LogLevel=ERROR",
-        "-p", str(local_port),
-        f"{username}@localhost",
-        "true",
-    ]
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return proc.returncode == 0
-    except Exception:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+
+    users: Dict[str, str] = {}
+    current_section: Optional[str] = None
+    for raw in text.splitlines():
+        no_comment = re.sub(r"(?:^|\s)#.*$", "", raw).rstrip()
+        stripped = no_comment.strip()
+        if not stripped or ":" not in stripped:
+            continue
+
+        indent = len(no_comment) - len(no_comment.lstrip(" \t"))
+        k, v = stripped.split(":", 1)
+        key = k.strip().strip("'\"").lower()
+        if not key:
+            continue
+
+        if indent == 0:
+            user = _clean_hpc_username(v)
+            if v.strip():
+                current_section = None
+                if user:
+                    users[key] = user
+            else:
+                current_section = key
+        elif current_section and key in ("username", "user"):
+            user = _clean_hpc_username(v)
+            if user:
+                users[current_section] = user
+
+    return users
+
+
+def _is_unix_socket_alive(socket_path: str) -> bool:
+    """Checks whether a UNIX domain socket is active and accepting connections."""
+    if not socket_path or not os.path.exists(socket_path):
         return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            s.connect(socket_path)
+            return True
+    except OSError:
+        return False
+
+
+def test_hpc_session_ready(cluster: str, username: str = "") -> bool:
+    """Tests whether the persistent background HPC terminal session is active for `cluster`."""
+    import glob
+
+    hpc_key = cluster.strip().lower()
+    if not hpc_key:
+        return False
+    if hpc_key == "localhost":
+        return True
+
+    candidates: List[str] = []
+    if username and username != "<your_username>":
+        candidates.append(f"/tmp/hpc_term_{username}_{hpc_key}.sock")
+    candidates.extend(sorted(glob.glob(f"/tmp/hpc_term_*_{hpc_key}.sock")))
+
+    for sock_path in candidates:
+        if _is_unix_socket_alive(sock_path):
+            return True
+    return False
 
 
 def resolve_experiment(ref: str, experiments: tuple[Experiment, ...]) -> Optional[Experiment]:
@@ -382,40 +430,49 @@ def cleanup_empty_directories(root_dir: Path) -> int:
 
 def stream_tar_pull(
     username: str,
-    port: int,
     tasks: List[Tuple[str, Path]],
     cluster: str = "HPC",
     debug: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Downloads remote files using a single streaming tar session over SSH.
-    - Sends all remote file paths to remote `tar -P -cf - --null -T -` via stdin.
+    - Sends unique remote file paths to remote `tar -P -cf - --null -T -` via stdin.
     - Reads the incoming byte stream locally via `tarfile.open(mode='r|*')`.
-    - Directly writes each member file to its target destination folder.
+    - Directly writes each member file to all requested local destination paths.
     - Missing files are ignored by remote tar and recorded as missing locally.
     Returns (completed_count, missing_count, error_count).
     """
     if not tasks:
         return 0, 0, 0
 
-    path_map: Dict[str, Path] = {r.lstrip("/"): l for r, l in tasks}
-    norm_to_remote: Dict[str, str] = {r.lstrip("/"): r for r, _ in tasks}
-    received_remote_paths: set = set()
+    dest_map: Dict[str, List[Path]] = {}
+    unique_remote_paths: List[str] = []
+    seen_dest_keys: set = set()
+    task_counts: Dict[Tuple[str, str], int] = {}
+
+    for r, l in tasks:
+        norm = r.lstrip("/")
+        d_key = (norm, os.path.abspath(str(l)))
+        task_counts[d_key] = task_counts.get(d_key, 0) + 1
+        if norm not in dest_map:
+            dest_map[norm] = []
+            unique_remote_paths.append(r)
+        if d_key not in seen_dest_keys:
+            seen_dest_keys.add(d_key)
+            dest_map[norm].append(l)
+
+    received_keys: set = set()
+    error_keys: set = set()
     total_tasks = len(tasks)
 
-    # Pack paths separated by null byte \0 for tar --null -T -
-    path_data = ("\0".join(r for r, _ in tasks) + "\0").encode("utf-8")
+    # Pack unique remote paths separated by null byte \0 for tar --null -T -
+    path_data = ("\0".join(unique_remote_paths) + "\0").encode("utf-8")
 
-    cmd = [
-        "ssh",
-        "-p", str(port),
-        "-o", "BatchMode=yes",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "LogLevel=ERROR",
-        f"{username}@localhost",
-        "tar -P -cf - --null -T -",
-    ]
+    ssh_helper_path = _resolve_ssh_helper_path()
+    cmd = [sys.executable, str(ssh_helper_path), cluster.lower()]
+    if username:
+        cmd.extend(["-u", username])
+    cmd.extend(["--cmd", "tar -P -cf - --null -T -"])
 
     proc = subprocess.Popen(
         cmd,
@@ -462,29 +519,103 @@ def stream_tar_pull(
                     if not member.isfile():
                         continue
                     norm = member.name.lstrip("/")
-                    dest = path_map.get(norm)
-                    if not dest:
+                    dests = [
+                        d for d in dest_map.get(norm, [])
+                        if (norm, os.path.abspath(str(d))) not in received_keys
+                    ]
+                    if not dests:
                         continue
 
-                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    prev_done = completed + errors
+
                     try:
                         fin = tar_stream.extractfile(member)
-                        if fin:
-                            with dest.open("wb") as fout:
-                                shutil.copyfileobj(fin, fout, length=64 * 1024)
-                            if dest.exists() and dest.stat().st_size > 0:
-                                completed += 1
-                                orig_r = norm_to_remote.get(norm, norm)
-                                received_remote_paths.add(orig_r)
-                            elif dest.exists() and dest.stat().st_size == 0:
-                                dest.unlink(missing_ok=True)
                     except Exception as e:
-                        errors += 1
-                        if debug:
-                            print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+                        for dest in dests:
+                            d_key = (norm, os.path.abspath(str(dest)))
+                            if d_key not in error_keys and d_key not in received_keys:
+                                error_keys.add(d_key)
+                                errors += task_counts.get(d_key, 1)
+                            if debug:
+                                print(f"  [DEBUG] Error extracting {dest}: {e}", file=sys.stderr)
+                        fin = None
+
+                    if fin:
+                        primary_dest: Optional[Path] = None
+                        primary_idx = -1
+                        stream_failed = False
+
+                        for idx, dest in enumerate(dests):
+                            d_key = (norm, os.path.abspath(str(dest)))
+                            try:
+                                dest.parent.mkdir(parents=True, exist_ok=True)
+                                fout = dest.open("wb")
+                            except Exception as e:
+                                if d_key not in error_keys and d_key not in received_keys:
+                                    error_keys.add(d_key)
+                                    errors += task_counts.get(d_key, 1)
+                                if debug:
+                                    print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+                                continue
+
+                            try:
+                                with fout:
+                                    shutil.copyfileobj(fin, fout, length=64 * 1024)
+                            except Exception as e:
+                                stream_failed = True
+                                primary_idx = idx
+                                if d_key not in error_keys and d_key not in received_keys:
+                                    error_keys.add(d_key)
+                                    errors += task_counts.get(d_key, 1)
+                                if debug:
+                                    print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+                                try:
+                                    dest.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+                                break
+
+                            primary_dest = dest
+                            primary_idx = idx
+                            break
+
+                        if stream_failed:
+                            for dest in dests[primary_idx + 1:]:
+                                d_key = (norm, os.path.abspath(str(dest)))
+                                if d_key not in error_keys and d_key not in received_keys:
+                                    error_keys.add(d_key)
+                                    errors += task_counts.get(d_key, 1)
+                                if debug:
+                                    print(f"  [DEBUG] Error writing {dest}: aborted after stream failure", file=sys.stderr)
+                        elif primary_dest is not None:
+                            if primary_dest.exists() and primary_dest.stat().st_size > 0:
+                                p_key = (norm, os.path.abspath(str(primary_dest)))
+                                if p_key not in received_keys:
+                                    received_keys.add(p_key)
+                                    completed += task_counts.get(p_key, 1)
+
+                                for dest in dests[primary_idx + 1:]:
+                                    d_key = (norm, os.path.abspath(str(dest)))
+                                    try:
+                                        dest.parent.mkdir(parents=True, exist_ok=True)
+                                        shutil.copy2(primary_dest, dest)
+                                        if dest.exists() and dest.stat().st_size > 0:
+                                            if d_key not in received_keys:
+                                                received_keys.add(d_key)
+                                                completed += task_counts.get(d_key, 1)
+                                        elif dest.exists() and dest.stat().st_size == 0:
+                                            dest.unlink(missing_ok=True)
+                                    except Exception as e:
+                                        if d_key not in error_keys and d_key not in received_keys:
+                                            error_keys.add(d_key)
+                                            errors += task_counts.get(d_key, 1)
+                                        if debug:
+                                            print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+                            elif primary_dest.exists() and primary_dest.stat().st_size == 0:
+                                primary_dest.unlink(missing_ok=True)
 
                     total_done = completed + errors
-                    if total_done % 10 == 0 or total_done == total_tasks:
+                    if total_done > prev_done and (total_done // 10 > prev_done // 10 or total_done == total_tasks):
                         pct = int(100 * total_done / total_tasks)
                         print(f"  Progress: {total_done}/{total_tasks} ({pct}%) [{completed} ok]", flush=True)
 
@@ -504,7 +635,11 @@ def stream_tar_pull(
             proc.kill()
             proc.wait()
 
-    missing_tasks = [(r, l) for r, l in tasks if r not in received_remote_paths]
+    missing_tasks = [
+        (r, l) for r, l in tasks
+        if (r.lstrip("/"), os.path.abspath(str(l))) not in received_keys
+        and (r.lstrip("/"), os.path.abspath(str(l))) not in error_keys
+    ]
     missing = len(missing_tasks)
 
     if total_tasks > 0 and (completed + errors < total_tasks or (completed + errors) % 10 != 0):
@@ -556,29 +691,28 @@ def batch_pull_graphics_files(
     if not pending:
         return results
 
-    # Deduplicate pending tasks by (port, remote_path, str(local_path))
-    unique_pending: Dict[Tuple[int, str, str], Dict[str, Any]] = {}
+    # Deduplicate pending tasks by (cluster, remote_path, str(local_path))
+    unique_pending: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     for t in pending:
-        key = (t["port"], t["remote_path"], str(t["local_path"]))
+        key = (t.get("cluster", "HPC"), t["remote_path"], str(t["local_path"]))
         unique_pending[key] = t
 
-    # Group tasks by remote endpoint: (username, port, cluster)
-    endpoints: Dict[Tuple[str, int, str], List[Tuple[str, Path]]] = {}
+    # Group tasks by remote endpoint: (username, cluster)
+    endpoints: Dict[Tuple[str, str], List[Tuple[str, Path]]] = {}
     for t in unique_pending.values():
-        ep_key = (t["username"], t["port"], t.get("cluster", "HPC"))
+        ep_key = (t["username"], t.get("cluster", "HPC"))
         if ep_key not in endpoints:
             endpoints[ep_key] = []
         endpoints[ep_key].append((t["remote_path"], Path(t["local_path"])))
 
     try:
-        for (user, port, cluster), cluster_tasks in endpoints.items():
+        for (user, cluster), cluster_tasks in endpoints.items():
             print(
-                f"[*] Downloading {len(cluster_tasks)} graphics figure(s) from {cluster} via streaming tar over SSH...",
+                f"[*] Downloading {len(cluster_tasks)} graphics figure(s) from {cluster} via streaming tar...",
                 flush=True,
             )
             stream_tar_pull(
                 username=user,
-                port=port,
                 tasks=cluster_tasks,
                 cluster=cluster,
                 debug=debug,
@@ -624,12 +758,16 @@ def process_graphics_slides(
     plan: Plan,
     output_dir: Path,
     deck: Any,
+    stats: Optional[Dict[str, int]] = None,
 ) -> int:
     """
     Checks HPC readiness, downloads necessary graphics files from HPC,
     and appends graphics slides to the PowerPoint presentation deck.
     Returns the number of graphics slides successfully added.
     """
+    if stats is not None:
+        stats["saved"] = 0
+
     if not plan.pygraf_graphics or not plan.pygraf_graphics.enable:
         return 0
 
@@ -660,36 +798,26 @@ def process_graphics_slides(
         return 0
 
     # 1. Identify all required HPC clusters from experiments
-    hpc_cfg = load_hpc_config_dict()
-    needed_clusters: Dict[str, Tuple[str, int]] = {}
+    hpc_users = load_hpc_users()
+    needed_clusters: Dict[str, str] = {}
     for exp in plan.experiments:
         cluster = exp.hpc_cluster
         if cluster and cluster not in needed_clusters:
-            c_info = hpc_cfg.get(cluster, {})
-            user = c_info.get("username")
-            port = c_info.get("my_local_port")
-            if user and port:
-                needed_clusters[cluster] = (user, port)
-            else:
-                needed_clusters[cluster] = ("", 0)
+            needed_clusters[cluster] = hpc_users.get(cluster.lower(), "")
 
-    # 2. Check if local connections to needed HPC clusters are active
-    unready_clusters = []
-    for cluster, (user, port) in needed_clusters.items():
-        if not user or not port:
-            unready_clusters.append((cluster, port))
-            continue
-        if not test_hpc_local_access(user, port):
-            unready_clusters.append((cluster, port))
+    # 2. Check if background terminal sessions to needed HPC clusters are active
+    unready_clusters: List[str] = []
+    for cluster, user in needed_clusters.items():
+        if not test_hpc_session_ready(cluster, user):
+            unready_clusters.append(cluster)
 
     if unready_clusters:
         print("\n" + "=" * 70, file=sys.stderr)
-        for cluster, port in unready_clusters:
-            port_str = f"localhost:{port}" if port else "not configured"
-            print(f"[!] Local SSH connection to '{cluster}' is not ready ({port_str}).", file=sys.stderr)
+        for cluster in unready_clusters:
+            print(f"[!] Background HPC terminal session for '{cluster}' is not ready.", file=sys.stderr)
         print("[!] Skipping pygraf graphics slides.", file=sys.stderr)
-        print("[!] To enable graphics slides, please establish the SSH tunnel first:", file=sys.stderr)
-        for cluster, _ in unready_clusters:
+        print("[!] To enable graphics slides, please establish the HPC session first:", file=sys.stderr)
+        for cluster in unready_clusters:
             print(f"        ush/ssh_helper.py {cluster}", file=sys.stderr)
         print("    and then rerun.", file=sys.stderr)
         print("=" * 70 + "\n", file=sys.stderr)
@@ -730,7 +858,7 @@ def process_graphics_slides(
                     tile = tile_override or tile_extracted
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
                         cluster = exp_obj.hpc_cluster
-                        user, port = needed_clusters.get(cluster, ("", 0))
+                        user = needed_clusters.get(cluster, "")
                         rem_path = build_remote_path(
                             comroot=exp_obj.remote_comroot,
                             prefix=prefix,
@@ -743,7 +871,6 @@ def process_graphics_slides(
                         local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
                         transfer_tasks.append({
                             "username": user,
-                            "port": port,
                             "remote_path": rem_path,
                             "local_path": local_img,
                             "cluster": cluster,
@@ -756,7 +883,7 @@ def process_graphics_slides(
                     tile = tile_override or tile_extracted
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
                         cluster = exp_obj.hpc_cluster
-                        user, port = needed_clusters.get(cluster, ("", 0))
+                        user = needed_clusters.get(cluster, "")
                         rem_path = build_remote_path(
                             comroot=exp_obj.remote_comroot,
                             prefix=prefix,
@@ -769,15 +896,30 @@ def process_graphics_slides(
                         local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
                         transfer_tasks.append({
                             "username": user,
-                            "port": port,
                             "remote_path": rem_path,
                             "local_path": local_img,
                             "cluster": cluster,
                             "clean_name": clean_name,
                         })
 
+    newly_saved_graphics = 0
+
     if transfer_tasks:
+        uncached_remote_dests: List[Path] = []
+        seen_dests: set[str] = set()
+        for t in transfer_tasks:
+            loc = Path(t["local_path"])
+            key = str(loc)
+            if key in seen_dests:
+                continue
+            seen_dests.add(key)
+            if not (loc.exists() and loc.stat().st_size > 0):
+                uncached_remote_dests.append(loc)
+
         batch_pull_graphics_files(transfer_tasks)
+        newly_saved_graphics += sum(
+            1 for loc in uncached_remote_dests if loc.exists() and loc.stat().st_size > 0
+        )
 
     # Pull uncached MRMS observation figures
     if mrms_tasks:
@@ -788,8 +930,14 @@ def process_graphics_slides(
             try:
                 from automats.mrms import fetch_mrms_images
                 fetch_mrms_images(uncached_mrms, output_dir=output_dir)
+                newly_saved_graphics += sum(
+                    1 for t in uncached_mrms if is_valid_mrms_file(t["dest_path"])
+                )
             except Exception as e:
                 print(f"[!] Warning: Could not fetch MRMS observation figures: {e}", file=sys.stderr)
+
+    if stats is not None:
+        stats["saved"] = newly_saved_graphics
 
     # 4. Phase 2: Render each graphics slide into PowerPoint deck
     from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN

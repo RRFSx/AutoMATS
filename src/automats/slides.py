@@ -504,6 +504,7 @@ def build_slides(
     *,
     log=None,
     missing: list[tuple[str, str]] | None = None,
+    graphics_stats: dict[str, int] | None = None,
 ) -> Path:
     has_mats_slides = bool(plan.slides)
     has_graphics_slides = bool(plan.pygraf_graphics and plan.pygraf_graphics.enable)
@@ -623,7 +624,7 @@ def build_slides(
     if has_graphics_slides:
         before_count = len(deck.slides)
         from automats.graphics import process_graphics_slides
-        process_graphics_slides(plan, output, deck=deck)
+        process_graphics_slides(plan, output, deck=deck, stats=graphics_stats)
         if len(deck.slides) > before_count:
             section_first_slide["pygraf"] = deck.slides[before_count]
             for slide_idx in range(before_count, len(deck.slides)):

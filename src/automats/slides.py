@@ -7,6 +7,7 @@ from io import BytesIO
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -416,7 +417,94 @@ def populate_overview_slide(
         ip.font.color.rgb = RGBColor(50, 65, 85)
 
 
-def build_slides(plan: Plan, output: Path) -> Path:
+def _describe_missing_reason(error: Exception) -> str:
+    if isinstance(error, FileNotFoundError):
+        return "Figure missing or skipped during plotting"
+    if "expected a PNG figure" in str(error):
+        return "Invalid image format (expected PNG)"
+    if isinstance(error, OSError):
+        return "Cannot read figure file"
+    return "Corrupt or unreadable PNG figure"
+
+
+def _render_missing_figure_png(
+    relative_path: str,
+    reason: str,
+    width: int = 1200,
+    height: int = 900,
+) -> tuple[bytes, int, int]:
+    """Renders an in-memory PNG placeholder for a missing or unreadable MATS figure."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    w = max(400, int(width))
+    h = max(300, int(height))
+    img = Image.new("RGB", (w, h), color=(244, 247, 250))
+    draw = ImageDraw.Draw(img)
+
+    pad = 18
+    draw.rectangle([(pad, pad), (w - pad - 1, h - pad - 1)], outline=(185, 198, 214), width=4)
+
+    def _font(size: int):
+        try:
+            return ImageFont.load_default(size=size)
+        except TypeError:
+            return ImageFont.load_default()
+
+    scale = min(w / 1200.0, h / 900.0)
+    font_title = _font(max(20, int(48 * scale)))
+    font_name = _font(max(14, int(28 * scale)))
+    font_reason = _font(max(12, int(24 * scale)))
+
+    title_text = "Plot Unavailable"
+    name_text = Path(relative_path).name
+    max_text_w = w - 2 * (pad + 24)
+
+    def _fit_text(text: str, font) -> str:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        if bbox[2] - bbox[0] <= max_text_w:
+            return text
+        ellipsis = "..."
+        trimmed = text
+        while len(trimmed) > 8:
+            trimmed = trimmed[:-4]
+            cand = trimmed + ellipsis
+            bbox = draw.textbbox((0, 0), cand, font=font)
+            if bbox[2] - bbox[0] <= max_text_w:
+                return cand
+        return text
+
+    name_text = _fit_text(name_text, font_name)
+    reason_text = _fit_text(reason, font_reason)
+
+    lines = [
+        (title_text, font_title, (55, 72, 94)),
+        (name_text, font_name, (95, 110, 130)),
+        (reason_text, font_reason, (140, 82, 82)),
+    ]
+    boxes = [draw.textbbox((0, 0), text, font=font) for text, font, _ in lines]
+    widths = [bbox[2] - bbox[0] for bbox in boxes]
+    heights = [bbox[3] - bbox[1] for bbox in boxes]
+
+    gap_y = max(14, int(24 * scale))
+    total_h = sum(heights) + gap_y * (len(lines) - 1)
+    y = (h - total_h) / 2
+    for (text, font, color), bbox, tw, th in zip(lines, boxes, widths, heights):
+        x = (w - tw) / 2 - bbox[0]
+        draw.text((x, y - bbox[1]), text, fill=color, font=font)
+        y += th + gap_y
+
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue(), w, h
+
+
+def build_slides(
+    plan: Plan,
+    output: Path,
+    *,
+    log=None,
+    missing: list[tuple[str, str]] | None = None,
+) -> Path:
     has_mats_slides = bool(plan.slides)
     has_graphics_slides = bool(plan.pygraf_graphics and plan.pygraf_graphics.enable)
 
@@ -431,6 +519,8 @@ def build_slides(plan: Plan, output: Path) -> Path:
         from pptx.util import Inches, Pt
     except ImportError as error:
         raise SlideError("PowerPoint dependencies are missing; rerun AutoMATS setup") from error
+
+    job_dimensions = {job.relative_path: (job.width, job.height) for job in plan.jobs}
 
     deck = Presentation()
     deck.slide_width = Inches(13 + 1 / 3)
@@ -486,9 +576,24 @@ def build_slides(plan: Plan, output: Path) -> Path:
                             raise ValueError("expected a PNG figure")
                         pixel_width, pixel_height = image.size
                         image.verify()
-                except (OSError, ValueError) as error:
-                    raise SlideError(f"Slide {index} ({spec.plot_group}), row {row_number}: "
-                                     f"cannot use {path}: {error}") from error
+                except (OSError, ValueError, SyntaxError, EOFError) as error:
+                    warning = (
+                        f"Warning: Slide {index} ({spec.plot_group}), row {row_number}: "
+                        f"cannot use {path} ({error}); using placeholder."
+                    )
+                    if log is not None:
+                        log(warning)
+                    else:
+                        print(warning, file=sys.stderr)
+                    if missing is not None:
+                        missing.append((relative_path, str(error)))
+                    ph_w, ph_h = job_dimensions.get(relative_path, (1200, 900))
+                    data, pixel_width, pixel_height = _render_missing_figure_png(
+                        relative_path,
+                        _describe_missing_reason(error),
+                        width=ph_w,
+                        height=ph_h,
+                    )
                 scale = min(image_width / pixel_width, row_height / pixel_height)
                 width = max(1, int(pixel_width * scale))
                 height = max(1, int(pixel_height * scale))

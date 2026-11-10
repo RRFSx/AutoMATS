@@ -49,6 +49,11 @@ class RunError(RuntimeError):
     pass
 
 
+class FatalRunError(RunError):
+    """Unrecoverable or server-wide error that must halt the run immediately."""
+    pass
+
+
 def lock_error(lock: Path) -> RunError:
     header = f"AutoMATS cannot start because the run lock exists: {lock}"
     caution = "Do not remove a lock while a run is active. Do not delete pacing.json or reset cooldown state."
@@ -269,7 +274,7 @@ class QueryPacer:
 
 def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool = True,
              log=print, *, metadata_only: bool = False, show_browser: bool = False, status=None,
-             update: bool = False) -> int:
+             update: bool = False, failures: list[tuple[PlotJob, str]] | None = None) -> int:
     def report(message, completed=None, total=None, wait_seconds=None):
         if status is not None:
             try:
@@ -281,7 +286,7 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
                 pass
 
     report("Initializing browser automation")
-    from automats.browser import Throttled, UpperAirBrowser, annotate_image
+    from automats.browser import FatalRunError as BrowserFatalRunError, Throttled, UpperAirBrowser, annotate_image
 
     try:
         from playwright.sync_api import sync_playwright
@@ -334,6 +339,7 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
                                          minimize=not (run_headless or show_browser),
                                          control_waiting_seconds=plan.settings.control_waiting_seconds)
                 saved = 0
+                skipped_failed = 0
                 for index, job in enumerate(jobs, 1):
                     if limit is not None and saved >= limit:
                         break
@@ -395,21 +401,53 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
                         saved += 1
                         pacer.after_plot()
                         report(f"Saved {label}", completed=index)
-                    except BaseException as error:
+                    except (FatalRunError, BrowserFatalRunError) as error:
                         if isinstance(error, Throttled):
                             pacer.cooldown(error.retry_after, reason="MATS HTTP 429 rate-limit protection")
                         elif query_pending:
                             pacer.cooldown(reason="Previous submitted query may still be running")
                         if submitted:
                             log("Stopped after a submitted query; no query retries or further plots will be sent")
-                        if isinstance(error, RunError):
-                            stage = "after submitting a plot query" if submitted else "before submitting this figure's plot query"
-                            raise RunError(
+                        stage = "after submitting a plot query" if submitted else "before submitting this figure's plot query"
+                        raise FatalRunError(
+                            f"Plot {job.name!r} ({job.application} / {job.plot_type}), figure {job.relative_path!r}: "
+                            f"{error} Stopped {stage}; {saved} figure(s) saved during this run are retained."
+                        ) from error
+                    except RunError as error:
+                        if submitted and "Query completion is unknown" in str(error):
+                            if query_pending:
+                                pacer.cooldown(reason="Previous submitted query may still be running")
+                            log("Stopped after a submitted query; no query retries or further plots will be sent")
+                            raise FatalRunError(
                                 f"Plot {job.name!r} ({job.application} / {job.plot_type}), figure {job.relative_path!r}: "
-                                f"{error} Stopped {stage}; {saved} figure(s) saved during this run are retained."
+                                f"{error} Stopped after submitting a plot query; {saved} figure(s) saved during this run are retained."
                             ) from error
+                        if submitted:
+                            pacer.after_plot()
+                        reset = getattr(client, "reset", None)
+                        if callable(reset):
+                            reset()
+                        reason = str(error)
+                        skipped_failed += 1
+                        log(
+                            f"[{index}/{len(jobs)}] Skip failed: Plot {job.name!r} "
+                            f"({job.application} / {job.plot_type}), figure {job.relative_path!r}: {reason}"
+                        )
+                        report(f"Skipped failed figure: {label}", completed=index)
+                        if failures is not None:
+                            failures.append((job, reason))
+                        continue
+                    except BaseException:
+                        if query_pending:
+                            pacer.cooldown(reason="Previous submitted query may still be running")
+                        if submitted:
+                            log("Stopped after a submitted query; no query retries or further plots will be sent")
                         raise
-                report(f"Run complete: {saved} figure(s) saved")
+                if skipped_failed:
+                    log(f"Completed with {skipped_failed} skipped failed figure(s); {saved} figure(s) saved during this run")
+                    report(f"Run complete: {saved} figure(s) saved, {skipped_failed} failed")
+                else:
+                    report(f"Run complete: {saved} figure(s) saved")
                 return saved
             finally:
                 report("Closing Chrome")

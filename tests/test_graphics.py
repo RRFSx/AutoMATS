@@ -416,6 +416,260 @@ class GraphicsTests(unittest.TestCase):
             self.assertEqual(added, 1)
             self.assertEqual(stats["saved"], 2)
 
+    def test_hpc_session_ready_requires_ping_response(self):
+        import json
+        import os
+        import select
+        import socket
+        import threading
+        import uuid
+        from automats.graphics import test_hpc_session_ready
+
+        unique_user = f"gfxping_{uuid.uuid4().hex[:8]}"
+        sock_path = f"/tmp/hpc_term_{unique_user}_gaeac7.sock"
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(sock_path)
+        srv.listen(4)
+        stop_evt = threading.Event()
+        state = {"mode": "hang"}
+        conns = []
+
+        def _serve():
+            while not stop_evt.is_set():
+                r, _, _ = select.select([srv], [], [], 0.05)
+                if srv in r:
+                    conn, _ = srv.accept()
+                    if state["mode"] == "ok":
+                        data = conn.recv(4096)
+                        req = json.loads(data.decode("utf-8").strip())
+                        self.assertEqual(req.get("cmd"), "ping")
+                        conn.sendall(b'{"code": 0, "stdout_b64": ""}\n')
+                        conn.close()
+                    elif state["mode"] == "fail":
+                        conn.recv(4096)
+                        conn.sendall(b'{"code": 1, "error": "dead"}\n')
+                        conn.close()
+                    else:
+                        conns.append(conn)
+
+        from unittest.mock import patch
+        th = threading.Thread(target=_serve, daemon=True)
+        th.start()
+        try:
+            with patch("glob.glob", return_value=[sock_path]):
+                self.assertFalse(test_hpc_session_ready("gaeac7", username=unique_user))
+                state["mode"] = "fail"
+                self.assertFalse(test_hpc_session_ready("gaeac7", username=unique_user))
+                state["mode"] = "ok"
+                self.assertTrue(test_hpc_session_ready("gaeac7", username=unique_user))
+        finally:
+            stop_evt.set()
+            th.join(timeout=1.0)
+            for c in conns:
+                try:
+                    c.close()
+                except OSError:
+                    pass
+            srv.close()
+            if os.path.exists(sock_path):
+                os.unlink(sock_path)
+
+    def test_ensure_hpc_worker_if_master_alive_reports_stale_and_handles_timeout(self):
+        from contextlib import redirect_stderr
+        import io
+        import subprocess
+        from unittest.mock import MagicMock, patch
+        import automats.graphics as gfx
+
+        mock_proc_fail = MagicMock()
+        mock_proc_fail.communicate.return_value = (
+            "",
+            "[!] Error: Background terminal session for 'gaeac7' failed to start: Remote SSH session stalled for 12s.\n"
+            "[!] Closed stale multiplex SSH session for user@gaea-c7.fairmont.rdhpcs.noaa.gov.\n"
+            "[!] Error: No active HPC session for 'gaeac7'.\n",
+        )
+        mock_proc_fail.returncode = 1
+
+        err_buf = io.StringIO()
+        with (
+            patch.object(gfx, "test_hpc_session_ready", return_value=False),
+            patch("subprocess.Popen", return_value=mock_proc_fail),
+            redirect_stderr(err_buf),
+        ):
+            ok = gfx._ensure_hpc_worker_if_master_alive("gaeac7", "user")
+
+        self.assertFalse(ok)
+        self.assertIn("stalled for 12s", err_buf.getvalue())
+        self.assertIn("Closed stale multiplex SSH session", err_buf.getvalue())
+
+        mock_proc_timeout = MagicMock()
+        mock_proc_timeout.communicate.side_effect = [subprocess.TimeoutExpired(["ssh_helper.py"], 48.0), ("", "")]
+        err_buf2 = io.StringIO()
+        with (
+            patch.object(gfx, "test_hpc_session_ready", return_value=False),
+            patch("subprocess.Popen", return_value=mock_proc_timeout),
+            redirect_stderr(err_buf2),
+        ):
+            ok2 = gfx._ensure_hpc_worker_if_master_alive("gaeac7", "user")
+
+        self.assertFalse(ok2)
+        self.assertTrue(mock_proc_timeout.terminate.called)
+        self.assertIn("Timed out verifying/recovering", err_buf2.getvalue())
+
+    def test_process_graphics_slides_attempts_worker_recovery_and_prints_status(self):
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import BytesIO, StringIO
+        from unittest.mock import patch
+        from PIL import Image
+        from pptx import Presentation
+        import automats.graphics as gfx
+
+        png_buf = BytesIO()
+        Image.new("RGB", (60, 40), color="navy").save(png_buf, format="PNG")
+        valid_png = png_buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gfx_recipe = tmp / "graphics_layout.yaml"
+            gfx_recipe.write_text(
+                "graphics slides:\n"
+                "- type: same valid time\n"
+                "  title: Reflectivity\n"
+                "  cycle: 2024050612\n"
+                "  graphics name: cref_full_sfc_f006.png\n"
+                "  number of rows: 1\n"
+                "  row1: [exp1]\n",
+                encoding="utf-8",
+            )
+            plan = build_plan({
+                "common": {"start": "2024-05-06T00:00:00Z", "end": "2024-05-07T00:00:00Z"},
+                "experiments": [
+                    {"name": "exp1", "color": "red", "COMROOT": "gaeac7:/gpfs/f7/exp1/com/rrfs/v2"},
+                ],
+                "plots": [
+                    {
+                        "name": "sfc_tseries",
+                        "application": "surface",
+                        "plot_type": "time series",
+                        "variable": ["t2m"],
+                        "statistic": ["rmse"],
+                    }
+                ],
+                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+            })
+
+            def fake_batch_pull(tasks, max_workers=1, debug=False):
+                results = {}
+                for t in tasks:
+                    loc = Path(t["local_path"])
+                    loc.parent.mkdir(parents=True, exist_ok=True)
+                    loc.write_bytes(valid_png)
+                    results[str(loc)] = True
+                return results
+
+            deck = Presentation()
+            out_fail = StringIO()
+            err_fail = StringIO()
+            with (
+                patch.object(gfx, "test_hpc_session_ready", return_value=False),
+                patch.object(gfx, "_ensure_hpc_worker_if_master_alive", return_value=False) as mock_recover_fail,
+                redirect_stdout(out_fail),
+                redirect_stderr(err_fail),
+            ):
+                added_fail = gfx.process_graphics_slides(plan, tmp, deck)
+
+            self.assertEqual(added_fail, 0)
+            self.assertEqual(mock_recover_fail.call_count, 1)
+            self.assertIn("checking SSH connection", out_fail.getvalue())
+            self.assertIn("Skipping pygraf graphics slides", err_fail.getvalue())
+
+            out_ok = StringIO()
+            stats = {}
+            with (
+                patch.object(gfx, "test_hpc_session_ready", return_value=False),
+                patch.object(gfx, "_ensure_hpc_worker_if_master_alive", return_value=True) as mock_recover_ok,
+                patch.object(gfx, "batch_pull_graphics_files", side_effect=fake_batch_pull),
+                redirect_stdout(out_ok),
+            ):
+                added_ok = gfx.process_graphics_slides(plan, tmp, deck, stats=stats)
+
+            self.assertEqual(added_ok, 1)
+            self.assertEqual(stats["saved"], 1)
+            self.assertEqual(mock_recover_ok.call_count, 1)
+            self.assertIn("checking SSH connection", out_ok.getvalue())
+
+    def test_ssh_check_status_bar_and_progress_display_coordination(self):
+        from contextlib import redirect_stderr
+        import io
+        import os
+        import time
+        from unittest.mock import patch
+        from pptx import Presentation
+        from automats.cli import ProgressDisplay
+        import automats.graphics as gfx
+
+        class FakeTty(io.StringIO):
+            def isatty(self):
+                return True
+
+        fake_tty = FakeTty()
+        with patch.object(gfx.shutil, "get_terminal_size", return_value=os.terminal_size((100, 24))):
+            with gfx._SshCheckStatusBar(
+                "Checking 'gaeac7' SSH connection...",
+                stream=fake_tty,
+                interval=0.02,
+            ):
+                time.sleep(0.14)
+
+        raw = fake_tty.getvalue()
+        self.assertIn("\r", raw)
+        self.assertIn("[====", raw)
+        self.assertTrue(raw.endswith("\r"))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gfx_recipe = tmp / "graphics_layout.yaml"
+            gfx_recipe.write_text(
+                "graphics slides:\n"
+                "- type: same valid time\n"
+                "  title: Reflectivity\n"
+                "  cycle: 2024050612\n"
+                "  graphics name: cref_full_sfc_f006.png\n"
+                "  number of rows: 1\n"
+                "  row1: [exp1]\n",
+                encoding="utf-8",
+            )
+            plan = build_plan({
+                "common": {"start": "2024-05-06T00:00:00Z", "end": "2024-05-07T00:00:00Z"},
+                "experiments": [
+                    {"name": "exp1", "color": "red", "COMROOT": "gaeac7:/gpfs/f7/exp1/com/rrfs/v2"},
+                ],
+                "plots": [
+                    {
+                        "name": "sfc_tseries",
+                        "application": "surface",
+                        "plot_type": "time series",
+                        "variable": ["t2m"],
+                        "statistic": ["rmse"],
+                    }
+                ],
+                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+            })
+
+            progress_stream = io.StringIO()
+            progress = ProgressDisplay(1, stream=progress_stream)
+            deck = Presentation()
+            with (
+                patch.object(gfx, "test_hpc_session_ready", return_value=False),
+                patch.object(gfx, "_ensure_hpc_worker_if_master_alive", return_value=False) as mock_rec,
+                redirect_stderr(io.StringIO()),
+            ):
+                gfx.process_graphics_slides(plan, tmp, deck, log=progress.log)
+
+            self.assertEqual(mock_rec.call_count, 1)
+            self.assertEqual(mock_rec.call_args.kwargs.get("show_status"), False)
+            self.assertIn("checking SSH connection", progress_stream.getvalue())
+
 
 class BaselineC6Tests(unittest.TestCase):
     @staticmethod

@@ -520,6 +520,264 @@ graphics list:
             self.assertEqual(targets[1]["username"], "User.Hera")
             self.assertEqual(users_str, "User.Gaea, User.Hera")
 
+    def test_hpc_session_ready_requires_ping_response(self):
+        import json
+        import select
+        import socket
+        import threading
+        import uuid
+        import download_pygraf_graphics as dl
+
+        unique_user = f"testping_{uuid.uuid4().hex[:8]}"
+        sock_path = f"/tmp/hpc_term_{unique_user}_gaeac7.sock"
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(sock_path)
+        srv.listen(4)
+        stop_evt = threading.Event()
+        reply_mode = {"respond": False}
+        conns = []
+
+        def _serve():
+            while not stop_evt.is_set():
+                r, _, _ = select.select([srv], [], [], 0.05)
+                if srv in r:
+                    conn, _ = srv.accept()
+                    if reply_mode["respond"]:
+                        data = conn.recv(4096)
+                        req = json.loads(data.decode("utf-8").strip())
+                        self.assertEqual(req.get("cmd"), "ping")
+                        self.assertTrue(req.get("probe_remote"))
+                        conn.sendall(b'{"code": 0, "stdout_b64": ""}\n')
+                        conn.close()
+                    else:
+                        conns.append(conn)
+
+        from unittest.mock import patch
+        th = threading.Thread(target=_serve, daemon=True)
+        th.start()
+        try:
+            with patch("glob.glob", return_value=[sock_path]):
+                # Accepting socket that hangs without replying must be rejected
+                self.assertFalse(dl.test_hpc_session_ready("gaeac7", username=unique_user))
+                # Switch to healthy ping responder -> accepted
+                reply_mode["respond"] = True
+                self.assertTrue(dl.test_hpc_session_ready("gaeac7", username=unique_user))
+        finally:
+            stop_evt.set()
+            th.join(timeout=1.0)
+            for c in conns:
+                try:
+                    c.close()
+                except OSError:
+                    pass
+            srv.close()
+            if Path(sock_path).exists():
+                Path(sock_path).unlink()
+
+    def test_stream_tar_pull_counts_helper_failure_and_terminates_on_interrupt(self):
+        from contextlib import redirect_stderr
+        import io
+        from unittest.mock import MagicMock, patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            tasks = [("/gpfs/path/f1.png", tmp / "f1.png")]
+
+            mock_proc = MagicMock()
+            mock_proc.stdin = io.BytesIO()
+            mock_proc.stdout = io.BytesIO(b"")
+            mock_proc.stderr = io.BytesIO(b"[!] No active HPC session for 'gaeac7'.\n")
+            mock_proc.wait.return_value = 1
+
+            err_buf = io.StringIO()
+            with patch("subprocess.Popen", return_value=mock_proc), redirect_stderr(err_buf):
+                completed, missing, errors = stream_tar_pull("user", tasks, cluster="gaeac7", debug=False)
+
+            self.assertEqual((completed, missing, errors), (0, 1, 1))
+            self.assertIn("No active HPC session", err_buf.getvalue())
+
+            mock_proc2 = MagicMock()
+            mock_proc2.stdin = io.BytesIO()
+            mock_proc2.stdout = io.BytesIO(b"")
+            mock_proc2.stderr = io.BytesIO()
+            with patch("subprocess.Popen", return_value=mock_proc2), patch("tarfile.open", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    stream_tar_pull("user", tasks, cluster="gaeac7")
+            self.assertTrue(mock_proc2.terminate.called)
+
+    def test_main_auto_recovers_wedged_worker_when_master_alive(self):
+        from unittest.mock import patch
+        import download_pygraf_graphics as dl
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            dl_yaml = tmp / "download_pygraf_graphics.yaml"
+            dl_yaml.write_text(
+                "COMROOT: gaeac7:/gpfs/f7/OPSROOT/EXP_RECOV/com/rrfs/v2.1.4\n"
+                "WGF: [det]\n"
+                "cycle: [2024050600]\n"
+                "fhr: [0]\n"
+                "graphics list:\n"
+                "- cref_{tile}_sfc_f{fhr}.png\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp / "graphics"
+
+            def fake_pull(username, tasks, cluster="HPC", debug=False):
+                for _, lpath in tasks:
+                    lpath.parent.mkdir(parents=True, exist_ok=True)
+                    lpath.write_bytes(b"PNG_RECOVERED")
+                return len(tasks), 0, 0
+
+            with (
+                patch.object(dl, "test_hpc_session_ready", return_value=False),
+                patch.object(dl, "_ensure_hpc_worker_if_master_alive", return_value=True) as mock_recover,
+                patch.object(dl, "stream_tar_pull", side_effect=fake_pull) as mock_pull,
+            ):
+                rc = dl.main([str(dl_yaml), "-o", str(out_dir)])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(mock_recover.call_count, 1)
+            self.assertEqual(mock_pull.call_count, 1)
+            self.assertTrue(
+                (out_dir / "EXP_RECOV" / "det" / "full" / "2024050600" / "cref_full_sfc_f000.png").exists()
+            )
+
+    def test_ensure_hpc_worker_if_master_alive_reports_stale_and_handles_timeout(self):
+        from contextlib import redirect_stderr, redirect_stdout
+        import io
+        import subprocess
+        from unittest.mock import MagicMock, patch
+        import download_pygraf_graphics as dl
+
+        mock_proc_ok = MagicMock()
+        mock_proc_ok.communicate.return_value = ("", "")
+        mock_proc_ok.returncode = 0
+        out_ok = io.StringIO()
+        with (
+            patch.object(dl, "test_hpc_session_ready", return_value=False),
+            patch("subprocess.Popen", return_value=mock_proc_ok),
+            redirect_stdout(out_ok),
+        ):
+            self.assertTrue(dl._ensure_hpc_worker_if_master_alive("gaeac7", "user"))
+        self.assertIn("Background HPC terminal session for 'gaeac7' is ready", out_ok.getvalue())
+
+        mock_proc_fail = MagicMock()
+        mock_proc_fail.communicate.return_value = (
+            "",
+            "[!] Error: Background terminal session for 'gaeac7' failed to start: Remote SSH session stalled for 12s.\n"
+            "[!] Closed stale multiplex SSH session for user@gaea-c7.fairmont.rdhpcs.noaa.gov.\n"
+            "[!] Error: No active HPC session for 'gaeac7'.\n",
+        )
+        mock_proc_fail.returncode = 1
+
+        err_buf = io.StringIO()
+        with (
+            patch.object(dl, "test_hpc_session_ready", return_value=False),
+            patch("subprocess.Popen", return_value=mock_proc_fail),
+            redirect_stderr(err_buf),
+        ):
+            ok = dl._ensure_hpc_worker_if_master_alive("gaeac7", "user")
+
+        self.assertFalse(ok)
+        self.assertIn("stalled for 12s", err_buf.getvalue())
+        self.assertIn("Closed stale multiplex SSH session", err_buf.getvalue())
+
+        mock_proc_timeout = MagicMock()
+        mock_proc_timeout.communicate.side_effect = [subprocess.TimeoutExpired(["ssh_helper.py"], 48.0), ("", "")]
+        err_buf2 = io.StringIO()
+        with (
+            patch.object(dl, "test_hpc_session_ready", return_value=False),
+            patch("subprocess.Popen", return_value=mock_proc_timeout),
+            redirect_stderr(err_buf2),
+        ):
+            ok2 = dl._ensure_hpc_worker_if_master_alive("gaeac7", "user")
+
+        self.assertFalse(ok2)
+        self.assertTrue(mock_proc_timeout.terminate.called)
+        self.assertIn("Timed out verifying/recovering", err_buf2.getvalue())
+
+    def test_ssh_check_status_bar_tty_and_non_tty_heartbeat(self):
+        import io
+        import os
+        import time
+        from unittest.mock import patch
+        import download_pygraf_graphics as dl
+
+        class FakeTty(io.StringIO):
+            def isatty(self):
+                return True
+
+        fake_tty = FakeTty()
+        with patch.object(dl.shutil, "get_terminal_size", return_value=os.terminal_size((100, 24))):
+            with dl._SshCheckStatusBar(
+                "Checking 'gaeac7' SSH connection...",
+                stream=fake_tty,
+                interval=0.02,
+            ):
+                time.sleep(0.14)
+
+        raw = fake_tty.getvalue()
+        self.assertIn("\r", raw)
+        self.assertIn("[====", raw)
+        self.assertIn("Checking 'gaeac7' SSH connection...", raw)
+        # Final clear writes spaces + '\r' back to column 0
+        self.assertTrue(raw.endswith("\r"))
+
+        fake_log = io.StringIO()
+        clock_vals = iter([0.0, 5.0, 10.0, 10.0])
+        bar = dl._SshCheckStatusBar(
+            "Checking 'gaeac7' SSH connection...",
+            stream=fake_log,
+            heartbeat_interval=5.0,
+            clock=lambda: next(clock_vals, 10.0),
+        )
+        with bar._lock:
+            bar._draw_locked()
+        log_out = fake_log.getvalue()
+        self.assertNotIn("\r", log_out)
+        self.assertIn("... Checking 'gaeac7' SSH connection... (5s elapsed)", log_out)
+
+    def test_main_does_not_auto_launch_ssh_helper_on_tty_or_non_tty(self):
+        from contextlib import redirect_stderr, redirect_stdout
+        import io
+        from unittest.mock import patch
+        import download_pygraf_graphics as dl
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            dl_yaml = tmp / "download_pygraf_graphics.yaml"
+            dl_yaml.write_text(
+                "COMROOT: gaeac7:/gpfs/f7/OPSROOT/EXP_AUTH/com/rrfs/v2.1.4\n"
+                "WGF: [det]\n"
+                "cycle: [2024050600]\n"
+                "fhr: [0]\n"
+                "graphics list:\n"
+                "- cref_{tile}_sfc_f{fhr}.png\n",
+                encoding="utf-8",
+            )
+            out_dir = tmp / "graphics"
+
+            for is_tty in (False, True):
+                out_buf = io.StringIO()
+                err_buf = io.StringIO()
+                with (
+                    patch.object(dl, "test_hpc_session_ready", return_value=False),
+                    patch.object(dl, "_ensure_hpc_worker_if_master_alive", return_value=False) as mock_recover,
+                    patch("subprocess.run", side_effect=AssertionError("ssh_helper.py should not be auto-launched")),
+                    patch.object(sys.stdin, "isatty", return_value=is_tty),
+                    patch.object(sys.stdout, "isatty", return_value=is_tty),
+                    redirect_stdout(out_buf),
+                    redirect_stderr(err_buf),
+                ):
+                    rc = dl.main([str(dl_yaml), "-o", str(out_dir)])
+
+                self.assertEqual(rc, 1)
+                self.assertEqual(mock_recover.call_count, 1)
+                self.assertEqual(mock_recover.call_args.kwargs.get("check_session_first"), False)
+                self.assertIn("checking SSH connection", out_buf.getvalue())
+                self.assertIn("ush/ssh_helper.py gaeac7", err_buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

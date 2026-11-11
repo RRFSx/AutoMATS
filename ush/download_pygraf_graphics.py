@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta
+import json
 import os
 from pathlib import Path
 import re
@@ -122,6 +123,34 @@ def _is_unix_socket_alive(socket_path: str) -> bool:
         return False
 
 
+def _ping_worker_socket(
+    socket_path: str,
+    timeout: float = 4.5,
+    probe_remote: bool = True,
+) -> bool:
+    """Verifies that a worker daemon socket responds to ping (and remote probe)."""
+    if not socket_path or not os.path.exists(socket_path):
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect(socket_path)
+            payload = {"cmd": "ping", "probe_remote": bool(probe_remote)}
+            s.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+            raw = bytearray()
+            while b"\n" not in raw:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                raw.extend(chunk)
+        if not raw:
+            return False
+        resp = json.loads(raw.decode("utf-8", errors="ignore").splitlines()[0].strip())
+        return int(resp.get("code", 1)) == 0
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        return False
+
+
 def test_hpc_session_ready(cluster: str, username: str = "") -> bool:
     """Verifies that the persistent background HPC terminal session is active for `cluster`."""
     import glob
@@ -137,10 +166,193 @@ def test_hpc_session_ready(cluster: str, username: str = "") -> bool:
         candidates.append(f"/tmp/hpc_term_{username}_{hpc_key}.sock")
     candidates.extend(sorted(glob.glob(f"/tmp/hpc_term_*_{hpc_key}.sock")))
 
+    seen: set[str] = set()
     for sock_path in candidates:
-        if _is_unix_socket_alive(sock_path):
+        if sock_path in seen:
+            continue
+        seen.add(sock_path)
+        if _ping_worker_socket(sock_path, timeout=3.0, probe_remote=True):
             return True
     return False
+
+
+class _SshCheckStatusBar:
+    """Single-line animated status bar on TTY (or periodic heartbeat in logs) while checking SSH."""
+
+    def __init__(
+        self,
+        message: str,
+        stream=None,
+        interval: float = 0.15,
+        heartbeat_interval: float = 5.0,
+        enabled: bool = True,
+        clock=time.monotonic,
+    ) -> None:
+        self.message = str(message).replace("\n", " ")
+        self.stream = sys.stdout if stream is None else stream
+        self.interval = max(0.02, float(interval))
+        self.heartbeat_interval = max(1.0, float(heartbeat_interval))
+        self.enabled = bool(enabled)
+        self.clock = clock
+        self.interactive = bool(getattr(self.stream, "isatty", lambda: False)())
+        self.started = clock()
+        self.frame = 0
+        self.width = 0
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _clear_locked(self) -> None:
+        if self.interactive and self.width:
+            self.stream.write("\r" + (" " * self.width) + "\r")
+            self.stream.flush()
+            self.width = 0
+
+    def _draw_locked(self) -> None:
+        elapsed = max(0, int(self.clock() - self.started))
+        if self.interactive:
+            track = 16
+            slider = 4
+            span = track - slider
+            pos = self.frame % (2 * span)
+            if pos > span:
+                pos = (2 * span) - pos
+            bar = ("." * pos) + ("=" * slider) + ("." * (span - pos))
+            spinner = "|/-\\"[self.frame % 4]
+            text = f"{spinner} [{bar}] {elapsed}s elapsed | {self.message}"
+            columns = max(20, shutil.get_terminal_size(fallback=(100, 24)).columns - 1)
+            text = text[:columns]
+            self._clear_locked()
+            self.stream.write("\r" + text)
+            self.stream.flush()
+            self.width = len(text)
+            self.frame += 1
+        else:
+            self.stream.write(f"    ... {self.message} ({elapsed}s elapsed)\n")
+            self.stream.flush()
+
+    def _animate(self) -> None:
+        wait_step = self.interval if self.interactive else self.heartbeat_interval
+        while not self._stop.wait(wait_step):
+            with self._lock:
+                self._draw_locked()
+
+    def __enter__(self):
+        if self.enabled:
+            self._thread = threading.Thread(target=self._animate, name="ssh-status-bar", daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        with self._lock:
+            self._clear_locked()
+
+
+def _ensure_hpc_worker_if_master_alive(
+    cluster: str,
+    username: str = "",
+    check_session_first: bool = True,
+    show_status: bool = True,
+) -> bool:
+    """
+    Attempts non-interactive worker recovery via `ssh_helper.py --cmd true` so a
+    wedged or stopped worker is replaced automatically whenever an active SSH
+    ControlMaster already exists (and stale ControlMasters are closed).
+    """
+    if check_session_first and test_hpc_session_ready(cluster, username):
+        return True
+    hpc_key = cluster.strip().lower()
+    if not hpc_key:
+        return False
+    if hpc_key == "localhost":
+        return True
+    ssh_helper_path = _resolve_ssh_helper_path()
+    if not ssh_helper_path.is_file():
+        return False
+    cmd = [sys.executable, str(ssh_helper_path), hpc_key]
+    if username and username != "<your_username>":
+        cmd.extend(["-u", username])
+    cmd.extend(["--cmd", "true"])
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with _SshCheckStatusBar(f"Checking '{hpc_key}' SSH connection...", enabled=show_status):
+            _, err_text = proc.communicate(timeout=48.0)
+        if proc.returncode == 0:
+            if show_status:
+                print(
+                    f"[✓] Background HPC terminal session for '{hpc_key}' is ready.",
+                    flush=True,
+                )
+            return True
+        if err_text:
+            for raw_line in err_text.splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                low = line.lower()
+                if any(
+                    tok in low
+                    for tok in ("stale", "failed to start", "timed out", "stalled", "authentication", "closed stale")
+                ):
+                    print(line, file=sys.stderr, flush=True)
+        return False
+    except subprocess.TimeoutExpired:
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.communicate(timeout=2.0)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.communicate(timeout=1.0)
+                except Exception:
+                    pass
+        print(
+            f"[!] Timed out verifying/recovering HPC terminal session for '{hpc_key}'.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return False
+    except (subprocess.SubprocessError, OSError):
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.0)
+            except Exception:
+                pass
+            if proc.stderr is not None:
+                try:
+                    proc.stderr.close()
+                except OSError:
+                    pass
+        return False
+    except BaseException:
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+            if proc.stderr is not None:
+                try:
+                    proc.stderr.close()
+                except OSError:
+                    pass
+        raise
 
 
 def _parse_yaml_scalar(v: str) -> Any:
@@ -642,6 +854,10 @@ def stream_tar_pull(
 
     completed = 0
     errors = 0
+    aborted = False
+    tar_read_error: Optional[tarfile.ReadError] = None
+    stream_os_error: Optional[Exception] = None
+    proc_rc: Optional[int] = None
 
     try:
         if proc.stdout:
@@ -753,21 +969,95 @@ def stream_tar_pull(
                         pct = int(100 * total_done / total_tasks)
                         print(f"  Progress: {total_done}/{total_tasks} ({pct}%) [{completed} ok]", flush=True)
 
-    except tarfile.ReadError:
-        # Happens if stream is empty (i.e. all files were missing on remote)
-        pass
+    except tarfile.ReadError as e:
+        tar_read_error = e
     except (subprocess.SubprocessError, OSError) as e:
+        stream_os_error = e
         if completed == 0:
             errors += 1
             print(f"[!] Error reading tar stream: {e}", file=sys.stderr)
-    finally:
-        t_in.join(timeout=3.0)
-        t_err.join(timeout=3.0)
+    except BaseException:
+        aborted = True
         try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            proc.terminate()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=0.5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        raise
+    finally:
+        if aborted:
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
+            try:
+                proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    pass
+            t_in.join(timeout=0.5)
+            t_err.join(timeout=0.5)
+        else:
+            t_in.join(timeout=3.0)
+            t_err.join(timeout=3.0)
+            try:
+                proc_rc = proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc_rc = proc.wait()
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
+
+    unexpected_stderr = [
+        line for line in stderr_lines
+        if "Cannot stat: No such file or directory" not in line
+        and "Error exit delayed" not in line
+        and "Exiting with failure status" not in line
+        and "Removing leading" not in line
+    ]
+    has_stat_missing = any(
+        "Cannot stat: No such file or directory" in line for line in stderr_lines
+    )
+
+    if unexpected_stderr:
+        header = "[DEBUG] Remote stderr output:" if debug else "[!] Remote / SSH helper stderr:"
+        print(f"\n{header}", file=sys.stderr)
+        for u in unexpected_stderr[:10]:
+            print(f"  {u}", file=sys.stderr)
+
+    if tar_read_error is not None:
+        benign_empty = (
+            completed == 0
+            and not unexpected_stderr
+            and stream_os_error is None
+            and (proc_rc == 0 or has_stat_missing)
+        )
+        if not benign_empty:
+            errors += 1
+            print(f"[!] Error reading tar stream: {tar_read_error}", file=sys.stderr)
+    elif (
+        stream_os_error is None
+        and unexpected_stderr
+        and isinstance(proc_rc, int)
+        and proc_rc != 0
+        and errors == 0
+    ):
+        errors += 1
 
     missing_tasks = [
         (r, l) for r, l in tasks
@@ -780,18 +1070,6 @@ def stream_tar_pull(
     if debug and missing > 0:
         for r_path, _ in missing_tasks:
             print(f"  [DEBUG] Missing on {cluster}: {Path(r_path).name}\n          Remote path: {r_path}", file=sys.stderr)
-
-    if debug and stderr_lines:
-        unexpected = [
-            line for line in stderr_lines
-            if "Cannot stat: No such file or directory" not in line
-            and "Error exit delayed" not in line
-            and "Removing leading" not in line
-        ]
-        if unexpected:
-            print(f"\n[DEBUG] Remote stderr output:", file=sys.stderr)
-            for u in unexpected[:10]:
-                print(f"  {u}", file=sys.stderr)
 
     return completed, missing, errors
 
@@ -1125,9 +1403,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     unready_clusters: List[str] = []
     for cluster in unique_clusters:
         if args.debug:
-            print(f"\n[*] [DEBUG] Verifying background HPC terminal session: {cluster}...")
-        if not test_hpc_session_ready(cluster, cluster_users.get(cluster, "")):
-            unready_clusters.append(cluster)
+            print(f"\n[*] [DEBUG] Verifying background HPC terminal session: {cluster}...", flush=True)
+        user = cluster_users.get(cluster, "")
+        with _SshCheckStatusBar(f"Verifying '{cluster}' HPC terminal session..."):
+            session_ready = test_hpc_session_ready(cluster, user)
+        if not session_ready:
+            print(
+                f"[*] HPC terminal session for '{cluster}' is not active; checking SSH connection...",
+                flush=True,
+            )
+            if not _ensure_hpc_worker_if_master_alive(cluster, user, check_session_first=False):
+                unready_clusters.append(cluster)
 
     if unready_clusters:
         print("\n" + "=" * 70, file=sys.stderr)

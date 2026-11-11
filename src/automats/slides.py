@@ -624,7 +624,7 @@ def build_slides(
     if has_graphics_slides:
         before_count = len(deck.slides)
         from automats.graphics import process_graphics_slides
-        process_graphics_slides(plan, output, deck=deck, stats=graphics_stats)
+        process_graphics_slides(plan, output, deck=deck, stats=graphics_stats, log=log)
         if len(deck.slides) > before_count:
             section_first_slide["pygraf"] = deck.slides[before_count]
             for slide_idx in range(before_count, len(deck.slides)):

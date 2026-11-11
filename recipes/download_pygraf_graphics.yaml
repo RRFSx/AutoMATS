@@ -2,6 +2,7 @@
 #
 COMROOT:
 - gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
+#- gaeac7:/gpfs/f7/arfs-gsl/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2.retv5/com/rrfs/v2.1.4
 
 # prefix is auto-detected from COMROOT (/com/<prefix>/<version>), or specify explicitly if needed
 # prefix: rrfs

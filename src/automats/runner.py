@@ -15,7 +15,7 @@ import time
 from automats.config import Plan, PlotJob, Settings, STATISTICS
 
 
-FIGURE_STYLE_VERSION = 8
+FIGURE_STYLE_VERSION = 9
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PNG_END = b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
 DEFAULT_USER_AGENT = (
@@ -193,8 +193,18 @@ class ResultStore:
         record = self.state["results"].get(job.relative_path, {})
         if not isinstance(record, dict):
             return False
-        if current_style and record.get("figure_style_version") != FIGURE_STYLE_VERSION:
-            return False
+        if current_style:
+            if record.get("figure_style_version") != FIGURE_STYLE_VERSION:
+                return False
+            recorded_style = record.get("header_style")
+            if not isinstance(recorded_style, list) or len(recorded_style) != 2:
+                return False
+            if any(type(v) not in (int, float) for v in recorded_style):
+                return False
+            if [float(v) for v in recorded_style] != [
+                float(job.description_font_size), float(job.legend_font_size)
+            ]:
+                return False
         if record.get("fingerprint") != job.fingerprint or record.get("base_url") != self.base_url:
             return False
         if effective is not None and record.get("mats", {}).get("effective_settings") != effective:
@@ -212,6 +222,7 @@ class ResultStore:
         self.state["results"][job.relative_path] = {
             "fingerprint": job.fingerprint, "base_url": self.base_url,
             "figure_style_version": FIGURE_STYLE_VERSION,
+            "header_style": [job.description_font_size, job.legend_font_size],
             "sha256": sha256(image).hexdigest(), "configuration": asdict(job),
             "mats": metadata,
         }

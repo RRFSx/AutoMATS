@@ -562,9 +562,10 @@ def build_slides(
         add_overview_backlink(slide, overview_slide, deck.slide_width)
 
         row_height = (deck.slide_height - content_top - margin - gap * (len(spec.rows) - 1)) // len(spec.rows)
+        caption_reserve = caption_width + caption_gap
         for row_number, row in enumerate(spec.rows, 1):
             cell_width = (deck.slide_width - 2 * margin - gap * (len(row) - 1)) // len(row)
-            image_width = cell_width - 2 * (caption_width + caption_gap)
+            image_width = cell_width - caption_reserve
             if row_height <= 0 or image_width <= 0:
                 raise SlideError(f"Slide {index}, row {row_number}: too many rows or figures to fit")
             row_top = content_top + (row_number - 1) * (row_height + gap)
@@ -598,7 +599,8 @@ def build_slides(
                 scale = min(image_width / pixel_width, row_height / pixel_height)
                 width = max(1, int(pixel_width * scale))
                 height = max(1, int(pixel_height * scale))
-                left = margin + column * (cell_width + gap) + (cell_width - width) // 2
+                cell_left = margin + column * (cell_width + gap)
+                left = max(cell_left + caption_reserve, cell_left + (cell_width - width) // 2)
                 top = row_top + (row_height - height) // 2
                 picture = slide.shapes.add_picture(BytesIO(data), left, top, width, height)
                 picture.name = relative_path

@@ -1047,33 +1047,39 @@ def process_graphics_slides(
     if stats is not None:
         stats["saved"] = 0
 
+    def _emit_warning(msg: str) -> None:
+        if callable(log):
+            log(msg)
+        else:
+            print(msg, file=sys.stderr)
+
     if not plan.pygraf_graphics or not plan.pygraf_graphics.enable:
         return 0
 
     recipe_name = plan.pygraf_graphics.recipe
     if not recipe_name:
-        print("[!] Warning: 'pygraf graphics slides' enabled but no 'recipe' file specified.", file=sys.stderr)
+        _emit_warning("[!] Warning: 'pygraf graphics slides' enabled but no 'recipe' file specified.")
         return 0
 
     recipe_file = resolve_graphics_recipe_path(recipe_name, plan.recipe_path)
     if not recipe_file or not recipe_file.exists():
-        print(f"[!] Warning: Graphics recipe file '{recipe_name}' not found.", file=sys.stderr)
+        _emit_warning(f"[!] Warning: Graphics recipe file '{recipe_name}' not found.")
         return 0
 
     if yaml is None:
-        print("[!] Warning: PyYAML is required to read graphics recipe; activate the virtual environment.", file=sys.stderr)
+        _emit_warning("[!] Warning: PyYAML is required to read graphics recipe; activate the virtual environment.")
         return 0
 
     try:
         with recipe_file.open(encoding="utf-8") as f:
             raw_data = yaml.safe_load(f)
     except Exception as e:
-        print(f"[!] Warning: Failed to parse graphics recipe '{recipe_file}': {e}", file=sys.stderr)
+        _emit_warning(f"[!] Warning: Failed to parse graphics recipe '{recipe_file}': {e}")
         return 0
 
     slides_config = raw_data.get("graphics slides") or raw_data.get("graphics_slides")
     if not slides_config or not isinstance(slides_config, list):
-        print(f"[!] Warning: No 'graphics slides' list found in '{recipe_file}'.", file=sys.stderr)
+        _emit_warning(f"[!] Warning: No 'graphics slides' list found in '{recipe_file}'.")
         return 0
 
     # 1. Identify all required HPC clusters from experiments
@@ -1117,15 +1123,21 @@ def process_graphics_slides(
                 unready_clusters.append(cluster)
 
     if unready_clusters:
-        print("\n" + "=" * 70, file=sys.stderr)
+        if callable(log):
+            _emit_warning("=" * 70)
+        else:
+            print("\n" + "=" * 70, file=sys.stderr)
         for cluster in unready_clusters:
-            print(f"[!] Background HPC terminal session for '{cluster}' is not ready.", file=sys.stderr)
-        print("[!] Skipping pygraf graphics slides.", file=sys.stderr)
-        print("[!] To enable graphics slides, please establish the HPC session first:", file=sys.stderr)
+            _emit_warning(f"[!] Background HPC terminal session for '{cluster}' is not ready.")
+        _emit_warning("[!] Skipping pygraf graphics slides.")
+        _emit_warning("[!] To enable graphics slides, please establish the HPC session first:")
         for cluster in unready_clusters:
-            print(f"        ush/ssh_helper.py {cluster}", file=sys.stderr)
-        print("    and then rerun.", file=sys.stderr)
-        print("=" * 70 + "\n", file=sys.stderr)
+            _emit_warning(f"        ush/ssh_helper.py {cluster}")
+        _emit_warning("    and then rerun.")
+        if callable(log):
+            _emit_warning("=" * 70)
+        else:
+            print("=" * 70 + "\n", file=sys.stderr)
         return 0
 
     # 3. Phase 1: Collect and batch-pull all needed graphic figures in parallel
@@ -1239,12 +1251,15 @@ def process_graphics_slides(
                     1 for t in uncached_mrms if is_valid_mrms_file(t["dest_path"])
                 )
             except Exception as e:
-                print(f"[!] Warning: Could not fetch MRMS observation figures: {e}", file=sys.stderr)
+                _emit_warning(f"[!] Warning: Could not fetch MRMS observation figures: {e}")
 
     if stats is not None:
         stats["saved"] = newly_saved_graphics
 
     # 4. Phase 2: Render each graphics slide into PowerPoint deck
+    if has_outer_progress:
+        bound_progress.update("Building pygraf graphics slides")
+
     from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
     from pptx.util import Inches, Pt
     from PIL import Image
@@ -1256,6 +1271,8 @@ def process_graphics_slides(
     caption_height = Inches(0.3)
 
     added_count = 0
+    warned_unresolved_exps: set[str] = set()
+    warned_missing_comroot: set[str] = set()
 
     for slide_idx, spec in enumerate(slides_config, 1):
         slide_type = str(spec.get("type", "same valid time")).strip().lower().replace("_", " ")
@@ -1351,9 +1368,13 @@ def process_graphics_slides(
                             local_img = get_missing_placeholder(output_dir, clean_name)
                     else:
                         if not exp_obj:
-                            print(f"[!] Warning: Experiment reference '{item_str}' could not be resolved.", file=sys.stderr)
+                            if item_str not in warned_unresolved_exps:
+                                warned_unresolved_exps.add(item_str)
+                                _emit_warning(f"[!] Warning: Experiment reference '{item_str}' could not be resolved.")
                         elif not exp_obj.COMROOT:
-                            print(f"[!] Warning: Experiment '{exp_obj.name}' has no COMROOT configured.", file=sys.stderr)
+                            if exp_obj.name not in warned_missing_comroot:
+                                warned_missing_comroot.add(exp_obj.name)
+                                _emit_warning(f"[!] Warning: Experiment '{exp_obj.name}' has no COMROOT configured.")
                         local_img = get_missing_placeholder(output_dir, clean_name)
                 else:
                     # 'same cycle': item is graphics filename (e.g. 'cref_full_sfc_f001.png')
@@ -1368,9 +1389,14 @@ def process_graphics_slides(
                             local_img = get_missing_placeholder(output_dir, clean_name)
                     else:
                         if not exp_obj:
-                            print(f"[!] Warning: Experiment reference '{item_str}' could not be resolved.", file=sys.stderr)
+                            ref_key = str(exp_ref)
+                            if ref_key not in warned_unresolved_exps:
+                                warned_unresolved_exps.add(ref_key)
+                                _emit_warning(f"[!] Warning: Experiment reference '{ref_key}' could not be resolved.")
                         elif not exp_obj.COMROOT:
-                            print(f"[!] Warning: Experiment '{exp_obj.name}' has no COMROOT configured.", file=sys.stderr)
+                            if exp_obj.name not in warned_missing_comroot:
+                                warned_missing_comroot.add(exp_obj.name)
+                                _emit_warning(f"[!] Warning: Experiment '{exp_obj.name}' has no COMROOT configured.")
                         local_img = get_missing_placeholder(output_dir, clean_name)
 
                 # Measure and position image
@@ -1402,7 +1428,7 @@ def process_graphics_slides(
                     img_data = local_img.read_bytes()
                     slide.shapes.add_picture(BytesIO(img_data), img_left, img_top, w, h)
                 except Exception as e:
-                    print(f"[!] Warning: Could not add picture '{local_img}': {e}", file=sys.stderr)
+                    _emit_warning(f"[!] Warning: Could not add picture '{local_img}': {e}")
 
         added_count += 1
 

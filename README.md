@@ -39,6 +39,8 @@ common:
   end: "2024-05-13T00:00:00Z"
   line weight: 2
   marker weight: 7
+  description font size: 24
+  legend font size: 28
 ```
 Omit `start` and `end` to use the first experiment's default MATS date range.
 

@@ -34,6 +34,8 @@ common:
   #end: "2024-05-13T00:00:00Z"
   line weight: 3
   marker weight: 8
+  #description font size: 24
+  #legend font size: 28
 
 automation:
   inter-plot waiting seconds: 3 

@@ -28,6 +28,8 @@ VARIABLES = {"temperature": ("Temperature", "T"), "t": ("Temperature", "T"),
 STATISTICS = {"rmse": "RMSE", "bias": "Bias (Model - Obs)"}
 STATISTIC_GROUPS = {"rmse": ("rmse",), "bias": ("bias",), "rmse+bias": ("rmse", "bias")}
 LEAD_COLORS = ("red", "blue", "green", "orange", "magenta", "teal", "black")
+DEFAULT_DESCRIPTION_FONT_SIZE = 24
+DEFAULT_LEGEND_FONT_SIZE = 28
 APPLICATION_ALIASES = {"upper air": "upperair", "upperair": "upperair", "surface": "surface"}
 VARIABLE_ALIASES = {
     "t2m": "Temperature at 2m (\u00b0C)",
@@ -114,6 +116,8 @@ class PlotJob:
     line_weight: float = 2
     marker_weight: float = 7
     default_date_experiment: str | None = None
+    description_font_size: float = DEFAULT_DESCRIPTION_FONT_SIZE
+    legend_font_size: float = DEFAULT_LEGEND_FONT_SIZE
 
     @property
     def statistics(self) -> tuple[str | None, ...]:
@@ -157,6 +161,8 @@ class PlotJob:
     @property
     def fingerprint(self) -> str:
         configuration = asdict(self)
+        configuration.pop("description_font_size", None)
+        configuration.pop("legend_font_size", None)
         if not self.forecast_lead_colors:
             configuration.pop("forecast_lead_colors")
         if self.application == "upperair":
@@ -426,9 +432,18 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
 def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
     raw = _mapping(raw, "recipe")
     common = _mapping(raw.get("common"), "common")
-    unknown = set(common) - {"start", "end", "line weight", "marker weight"}
+    unknown = set(common) - {
+        "start", "end",
+        "line weight", "marker weight",
+        "description font size", "description_font_size",
+        "legend font size", "legend_font_size",
+    }
     if unknown:
         raise ConfigError(f"Unknown common options: {sorted(unknown)}")
+    if "description font size" in common and "description_font_size" in common:
+        raise ConfigError("Use only one description font size spelling in common")
+    if "legend font size" in common and "legend_font_size" in common:
+        raise ConfigError("Use only one legend font size spelling in common")
     start = _date(common["start"], "common.start") if common.get("start") is not None else None
     end = _date(common["end"], "common.end") if common.get("end") is not None else None
     if start is not None and end is not None and start >= end:
@@ -438,6 +453,20 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
     for name, value in (("line weight", line_weight), ("marker weight", marker_weight)):
         if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
             raise ConfigError(f"common.{name} must be a positive finite number in pixels")
+    description_font_size = common.get(
+        "description font size",
+        common.get("description_font_size", DEFAULT_DESCRIPTION_FONT_SIZE),
+    )
+    legend_font_size = common.get(
+        "legend font size",
+        common.get("legend_font_size", DEFAULT_LEGEND_FONT_SIZE),
+    )
+    for name, value in (
+        ("description font size", description_font_size),
+        ("legend font size", legend_font_size),
+    ):
+        if type(value) not in (int, float) or not math.isfinite(value) or not 4 <= value <= 72:
+            raise ConfigError(f"common.{name} must be a finite number between 4 and 72 pixels")
     notices = []
     experiments = []
     for index, item in enumerate(_choices(raw.get("experiments"), "experiments")):
@@ -599,7 +628,9 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
                                     parameters=tuple(zip(extra_keys, extras)),
                                     line_weight=line_weight, marker_weight=marker_weight,
                                     default_date_experiment=plot_experiments[0].name
-                                    if start is None or end is None else None))
+                                    if start is None or end is None else None,
+                                    description_font_size=description_font_size,
+                                    legend_font_size=legend_font_size))
     planned_jobs = tuple(jobs)
     slide_error = None
     try:

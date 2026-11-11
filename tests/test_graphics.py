@@ -670,6 +670,96 @@ class GraphicsTests(unittest.TestCase):
             self.assertEqual(mock_rec.call_args.kwargs.get("show_status"), False)
             self.assertIn("checking SSH connection", progress_stream.getvalue())
 
+    def test_process_graphics_slides_deduplicates_missing_comroot_warning_and_logs_cleanly(self):
+        from contextlib import redirect_stderr
+        import io
+        import os
+        from unittest.mock import patch
+        from pptx import Presentation
+        from automats.cli import ProgressDisplay
+        import automats.graphics as gfx
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gfx_recipe = tmp / "graphics_layout.yaml"
+            gfx_recipe.write_text(
+                "graphics slides:\n"
+                "- type: same valid time\n"
+                "  title: Reflectivity\n"
+                "  cycle: 2024050700\n"
+                "  graphics name: cref_full_sfc_f006.png\n"
+                "  number of rows: 2\n"
+                "  row1: [first, second]\n"
+                "  row2: [obs]\n"
+                "- type: same cycle\n"
+                "  title: Reflectivity\n"
+                "  experiment: second\n"
+                "  cycle: 2024050700\n"
+                "  number of rows: 2\n"
+                "  row1: [cref_full_sfc_f001.pg, obs]\n"
+                "  row2: [cref_full_sfc_f002.pg, obs]\n",
+                encoding="utf-8",
+            )
+            plan = build_plan({
+                "common": {"start": "2024-05-06T00:00:00Z", "end": "2024-05-07T00:00:00Z"},
+                "experiments": [
+                    {"name": "exp_with_comroot", "color": "red", "COMROOT": "gaeac6:/gpfs/exp1/com/rrfs/v2"},
+                    {"name": "exp_no_comroot", "color": "blue"},
+                ],
+                "plots": [
+                    {
+                        "name": "sfc_tseries",
+                        "application": "surface",
+                        "plot_type": "time series",
+                        "variable": ["t2m"],
+                        "statistic": ["rmse"],
+                    }
+                ],
+                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+            })
+
+            expected_warning = "[!] Warning: Experiment 'exp_no_comroot' has no COMROOT configured."
+
+            # 1. Without outer log callback, warning prints once to stderr
+            deck1 = Presentation()
+            err1 = io.StringIO()
+            with (
+                patch.object(gfx, "test_hpc_session_ready", return_value=True),
+                patch.object(gfx, "batch_pull_graphics_files", return_value={}),
+                patch("automats.mrms.fetch_mrms_images", return_value=None),
+                redirect_stderr(err1),
+            ):
+                added1 = gfx.process_graphics_slides(plan, tmp, deck1)
+
+            self.assertEqual(added1, 2)
+            self.assertEqual(err1.getvalue().count(expected_warning), 1)
+
+            # 2. With TTY ProgressDisplay, warning logs once cleanly without colliding on spinner text
+            class FakeTty(io.StringIO):
+                def isatty(self):
+                    return True
+
+            tty_stream = FakeTty()
+            err2 = io.StringIO()
+            deck2 = Presentation()
+            with (
+                patch.object(gfx.shutil, "get_terminal_size", return_value=os.terminal_size((120, 24))),
+                patch.object(gfx, "test_hpc_session_ready", return_value=True),
+                patch.object(gfx, "batch_pull_graphics_files", return_value={}),
+                patch("automats.mrms.fetch_mrms_images", return_value=None),
+                redirect_stderr(err2),
+            ):
+                with ProgressDisplay(0, stream=tty_stream) as progress:
+                    added2 = gfx.process_graphics_slides(plan, tmp, deck2, log=progress.log)
+
+            self.assertEqual(added2, 2)
+            self.assertEqual(err2.getvalue(), "")
+            output = tty_stream.getvalue()
+            self.assertEqual(output.count(expected_warning), 1)
+            self.assertIn(f"\r{expected_warning}\n", output)
+            self.assertNotIn(f"session{expected_warning}", output)
+            self.assertIn("Building pygraf graphics slides", output)
+
 
 class BaselineC6Tests(unittest.TestCase):
     @staticmethod
@@ -866,7 +956,6 @@ class BaselineC6Tests(unittest.TestCase):
     def test_main_omitted_hpc_dir_skips_target_comroot_keeps_baseline_graphics(self):
         from contextlib import redirect_stderr, redirect_stdout
         import io
-        import sys
         from unittest.mock import patch
         import yaml
 
@@ -876,30 +965,17 @@ class BaselineC6Tests(unittest.TestCase):
             root = self._make_fake_root(Path(tmpdir))
             captured = {}
 
-            def fake_automats_main(cli_args):
+            def fake_automats_main(cli_args, *, pre_slides_warnings=None):
                 captured["args"] = cli_args
-                print("Saved slides to /tmp/slides.pptx")
-                print("AutoMATS stderr detail", file=sys.stderr)
+                captured["warnings"] = list(pre_slides_warnings or ())
                 return 0
 
-            out1 = io.StringIO()
-            err1 = io.StringIO()
-            combined1 = io.StringIO()
-            combined2 = io.StringIO()
             with (
                 patch.object(baselinec6, "ROOT", root),
-                patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
+                patch.object(baselinec6, "automats_main", new=fake_automats_main),
             ):
-                # Capture combined stream to verify ordering across stdout and stderr
-                with redirect_stdout(combined1), redirect_stderr(combined1):
-                    rc1 = baselinec6.main(["existing_other", "--plan"])
+                rc1 = baselinec6.main(["existing_other", "--plan"])
                 data1 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
-                with redirect_stdout(combined2), redirect_stderr(combined2):
-                    rc2 = baselinec6.main(["brand_new_exp", "--plan"])
-                data2 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
-                # Also verify stderr separately and check warning isn't emitted on failure exit code
-                with redirect_stdout(out1), redirect_stderr(err1):
-                    rc3 = baselinec6.main(["brand_new_exp", "--plan"])
 
             self.assertEqual(rc1, 0)
             self.assertEqual(
@@ -908,29 +984,75 @@ class BaselineC6Tests(unittest.TestCase):
             )
             self.assertNotIn("COMROOT", data1["experiments"][1])
             self.assertTrue(data1["pygraf graphics slides"]["enable"])
-            lines1 = [line for line in combined1.getvalue().splitlines() if line.strip()]
             self.assertEqual(
-                lines1,
-                [
-                    "Saved slides to /tmp/slides.pptx",
-                    "AutoMATS stderr detail",
-                    "Warning: no pygraf graphics downloaded for 'existing_other' as hpc_dir is missing.",
-                ],
+                captured["warnings"],
+                ["Warning: no pygraf graphics downloaded for 'existing_other' as hpc_dir is missing."],
             )
 
+            # End-to-end check against real automats.cli.main: warning prints before "Saved slides to"
+            out_dir = root / "results" / "baseline_c6_brand_new_exp"
+
+            def fake_build_slides(plan, out_path, *, log=None, missing=None, graphics_stats=None):
+                if graphics_stats is not None:
+                    graphics_stats["saved"] = 0
+                return out_path / "slides.pptx"
+
+            combined_meta = io.StringIO()
+            combined_slides_only = io.StringIO()
+            err_only = io.StringIO()
+            out_only = io.StringIO()
+            with (
+                patch.object(baselinec6, "ROOT", root),
+                patch("automats.cli.run_plan", return_value=0),
+                patch("automats.cli.build_slides", side_effect=fake_build_slides),
+            ):
+                with redirect_stdout(combined_meta), redirect_stderr(combined_meta):
+                    rc2 = baselinec6.main(["brand_new_exp", "--metadata-only"])
+                with redirect_stdout(combined_slides_only), redirect_stderr(combined_slides_only):
+                    rc3 = baselinec6.main(["brand_new_exp", "--slides-only"])
+                with redirect_stdout(out_only), redirect_stderr(err_only):
+                    rc4 = baselinec6.main(["brand_new_exp", "--slides-only"])
+
+            expected_warning = "Warning: no pygraf graphics downloaded for 'brand_new_exp' as hpc_dir is missing."
+            expected_saved_slides = f"Saved slides to {out_dir.resolve() / 'slides.pptx'}"
+
             self.assertEqual(rc2, 0)
-            self.assertNotIn("COMROOT", data2["experiments"][1])
-            self.assertTrue(data2["pygraf graphics slides"]["enable"])
-            lines2 = [line for line in combined2.getvalue().splitlines() if line.strip()]
-            self.assertEqual(
-                lines2[-1],
-                "Warning: no pygraf graphics downloaded for 'brand_new_exp' as hpc_dir is missing.",
-            )
+            meta_lines = [line for line in combined_meta.getvalue().splitlines() if line.strip()]
+            self.assertEqual(meta_lines[-2], expected_warning)
+            self.assertEqual(meta_lines[-1], expected_saved_slides)
+            self.assertIn(f"Saved 0 graphics under {out_dir.resolve() / 'graphics'}", meta_lines)
+
             self.assertEqual(rc3, 0)
-            self.assertEqual(
-                err1.getvalue().splitlines()[-1],
-                "Warning: no pygraf graphics downloaded for 'brand_new_exp' as hpc_dir is missing.",
-            )
+            slides_only_lines = [line for line in combined_slides_only.getvalue().splitlines() if line.strip()]
+            self.assertEqual(slides_only_lines[-2], expected_warning)
+            self.assertEqual(slides_only_lines[-1], expected_saved_slides)
+
+            self.assertEqual(rc4, 0)
+            self.assertEqual(err_only.getvalue().splitlines()[-1], expected_warning)
+            self.assertEqual(out_only.getvalue().splitlines()[-1], expected_saved_slides)
+
+            # Failure exit code must not emit the omitted-hpc_dir warning
+            err_fail = io.StringIO()
+            with (
+                patch.object(baselinec6, "ROOT", root),
+                patch("automats.cli.load_plan", side_effect=RuntimeError("boom")),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(err_fail),
+            ):
+                rc_fail = baselinec6.main(["brand_new_exp", "--slides-only"])
+            self.assertEqual(rc_fail, 1)
+            self.assertNotIn("no pygraf graphics downloaded", err_fail.getvalue())
+
+            # Legacy 1-arg mock for automats_main still works cleanly
+            legacy_err = io.StringIO()
+            with (
+                patch.object(baselinec6, "ROOT", root),
+                patch.object(baselinec6, "automats_main", side_effect=lambda cli_args: 0),
+                redirect_stderr(legacy_err),
+            ):
+                rc_legacy = baselinec6.main(["brand_new_exp", "--plan"])
+            self.assertEqual(rc_legacy, 0)
+            self.assertEqual(legacy_err.getvalue().strip(), expected_warning)
 
     def test_main_uses_baseline_hpc_dir_even_if_baseline_yaml_lacks_it(self):
         from unittest.mock import patch

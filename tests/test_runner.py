@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 from automats.config import Settings, STATISTICS, build_plan
 from automats.browser import EXPORT_IMAGE, Throttled, UpperAirBrowser, annotate_image, discover_applications, figure_header, minimize_window, resolve_application, retry_after_seconds
 from automats.cli import ProgressDisplay, main
-from automats.runner import CHROMIUM_ARGS, CHROMIUM_IGNORE_DEFAULT_ARGS, DEFAULT_USER_AGENT, FatalRunError, PNG_SIGNATURE, QueryPacer, ResolutionError, ResultStore, RunError, figure_exists, is_png, lock_error, resolve_option, run_plan, validate_curves, validate_effective_curves
+from automats.runner import CHROMIUM_ARGS, CHROMIUM_IGNORE_DEFAULT_ARGS, DEFAULT_USER_AGENT, FIGURE_STYLE_VERSION, FatalRunError, PNG_SIGNATURE, QueryPacer, ResolutionError, ResultStore, RunError, figure_exists, is_png, lock_error, resolve_option, run_plan, validate_curves, validate_effective_curves
 from automats.slides import SlideError, build_slides
 from test_config import example
 
@@ -982,8 +982,10 @@ class MetadataTests(unittest.TestCase):
                 annotated, metadata = annotate_image(page, job, bytes(image))
                 self.assertTrue(annotated.startswith(PNG_SIGNATURE))
                 self.assertEqual(metadata["width"], 1200)
+                self.assertEqual(metadata["description_font_size"], 24)
+                self.assertEqual(metadata["legend_font_size"], 28)
+                self.assertGreater(metadata["header_height"], 60)
                 self.assertEqual(metadata["height"], 1200 + metadata["header_height"])
-                self.assertEqual(metadata["header_height"], 60)
                 self.assertEqual(metadata["legend_rows"], 1)
                 self.assertEqual(metadata["legend_names"], [experiment.name for experiment in job.experiments])
                 self.assertEqual(metadata["header"], figure_header(job))
@@ -992,18 +994,36 @@ class MetadataTests(unittest.TestCase):
                 combined_image, combined_metadata = annotate_image(page, combined, bytes(image))
                 self.assertEqual(combined_metadata["legend_names"], ["RRFSv2x", "RRFSv2b"])
                 self.assertEqual(combined_metadata["legend_styles"], ["solid"])
-                extra_swatch_pixels = page.evaluate("""async image => {
+                swatch_scan = page.evaluate("""async ({image, headerHeight}) => {
                     const source = new Image(); source.src = image; await source.decode();
                     const canvas = document.createElement('canvas');
                     canvas.width = source.naturalWidth; canvas.height = source.naturalHeight;
                     const context = canvas.getContext('2d'); context.drawImage(source, 0, 0);
-                    const pixels = context.getImageData(50, 30, 36, 24).data;
-                    let red = 0;
-                    for (let index = 0; index < pixels.length; index += 4)
-                        if (pixels[index] > 180 && pixels[index+1] < 100 && pixels[index+2] < 100) red++;
-                    return red;
-                }""", "data:image/png;base64," + base64.b64encode(combined_image).decode())
-                self.assertLess(extra_swatch_pixels, 5)
+                    const pixels = context.getImageData(0, 0, canvas.width, headerHeight).data;
+                    let minRedX = canvas.width, maxRedX = -1, red = 0, blue = 0, minBlueX = canvas.width;
+                    for (let y = 0; y < headerHeight; y++) {
+                        for (let x = 0; x < canvas.width; x++) {
+                            const i = (y * canvas.width + x) * 4;
+                            const r = pixels[i], g = pixels[i + 1], b = pixels[i + 2];
+                            if (r > 180 && g < 100 && b < 100) {
+                                red++;
+                                if (x < minRedX) minRedX = x;
+                                if (x > maxRedX) maxRedX = x;
+                            } else if (b > 180 && r < 100 && g < 100) {
+                                blue++;
+                                if (x < minBlueX) minBlueX = x;
+                            }
+                        }
+                    }
+                    return {red, blue, minRedX, maxRedX, minBlueX};
+                }""", {
+                    "image": "data:image/png;base64," + base64.b64encode(combined_image).decode(),
+                    "headerHeight": combined_metadata["header_height"],
+                })
+                self.assertGreater(swatch_scan["red"], 20)
+                self.assertGreater(swatch_scan["blue"], 20)
+                self.assertLess(swatch_scan["maxRedX"] - swatch_scan["minRedX"], 65)
+                self.assertGreater(swatch_scan["minBlueX"], swatch_scan["maxRedX"] + 40)
                 self.assertIn("RMSE (solid) + BIAS (dashed)", combined_metadata["header"][0])
                 grouped = replace(combined, lead=(0, 1, 3, 6, 9), experiments=job.experiments[:1])
                 _, grouped_metadata = annotate_image(page, grouped, bytes(image))
@@ -1030,7 +1050,8 @@ class MetadataTests(unittest.TestCase):
                 self.assertLess(pixels["chart"][1], 20)
                 refreshed, refreshed_metadata = annotate_image(page, job, annotated, metadata)
                 self.assertTrue(refreshed.startswith(PNG_SIGNATURE))
-                self.assertEqual(refreshed_metadata["height"], 1260)
+                self.assertEqual(refreshed_metadata["header_height"], metadata["header_height"])
+                self.assertEqual(refreshed_metadata["height"], 1200 + refreshed_metadata["header_height"])
                 six_experiments = example()
                 six_experiments["experiments"] = [
                     {"name": f"RRFSv2_conus_3km_ret_NoObsGrp_Rec_Soil_{index}", "color": "blue"}
@@ -1038,7 +1059,8 @@ class MetadataTests(unittest.TestCase):
                 crowded_job = build_plan(six_experiments).jobs[0]
                 _, crowded = annotate_image(page, crowded_job, bytes(image))
                 self.assertEqual(crowded["legend_rows"], 6)
-                self.assertEqual(crowded["height"], 1380)
+                self.assertGreater(crowded["header_height"], metadata["header_height"])
+                self.assertEqual(crowded["height"], 1200 + crowded["header_height"])
                 self.assertEqual(crowded["legend_names"], [experiment.name for experiment in crowded_job.experiments])
                 legacy = dict(metadata, disclaimer="Legacy research disclaimer")
                 cleared, _ = annotate_image(page, job, annotated, legacy)
@@ -1107,6 +1129,171 @@ class MetadataTests(unittest.TestCase):
             with patch("automats.runner.Path.home", return_value=Path(directory)), redirect_stdout(StringIO()):
                 self.assertEqual(run_plan(plan, Path(directory) / "figures", metadata_only=True), 0)
             browser.assert_not_called()
+
+    def test_custom_font_sizes_word_wrapping_and_inline_legend_flow(self):
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.skipTest("Playwright is not installed")
+        from automats.config import Experiment
+
+        job = build_plan(example()).jobs[0]
+        with sync_playwright() as manager:
+            try:
+                browser = manager.chromium.launch(channel="chrome", headless=True)
+            except Exception as error:
+                self.skipTest(f"Installed Chrome unavailable: {error}")
+            try:
+                page = browser.new_page()
+                landscape = bytes(page.evaluate("""() => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 1600; canvas.height = 900;
+                    const context = canvas.getContext('2d');
+                    context.fillStyle = 'blue'; context.fillRect(0, 0, 1600, 900);
+                    return Array.from(Uint8Array.from(atob(canvas.toDataURL('image/png').split(',')[1]),
+                        character => character.charCodeAt(0)));
+                }"""))
+
+                small_job = replace(job, width=1600, height=900, description_font_size=16, legend_font_size=16)
+                default_job = replace(job, width=1600, height=900)
+                large_job = replace(job, width=1600, height=900, description_font_size=30, legend_font_size=34)
+                _, small_meta = annotate_image(page, small_job, landscape)
+                _, default_meta = annotate_image(page, default_job, landscape)
+                _, large_meta = annotate_image(page, large_job, landscape)
+                self.assertEqual((small_meta["description_font_size"], small_meta["legend_font_size"]), (16, 16))
+                self.assertEqual((large_meta["description_font_size"], large_meta["legend_font_size"]), (30, 34))
+                self.assertLess(small_meta["header_height"], default_meta["header_height"])
+                self.assertLess(default_meta["header_height"], large_meta["header_height"])
+                for meta in (small_meta, default_meta, large_meta):
+                    self.assertEqual(meta["height"] - meta["header_height"], 900)
+
+                three_long = (
+                    Experiment("RRFSv2_conus_3km_ret_v2x_retv4", "red"),
+                    Experiment("RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km", "blue"),
+                    Experiment("HRRR_OPS", "orange"),
+                )
+                four_long = (*three_long, Experiment("RRFS_A_experiment_extra", "green"))
+                _, meta_three = annotate_image(page, replace(default_job, experiments=three_long), landscape)
+                _, meta_four = annotate_image(page, replace(default_job, experiments=four_long), landscape)
+                self.assertEqual(meta_three["legend_rows"], 1)
+                self.assertEqual(meta_four["legend_rows"], 2)
+
+                # Verify descriptions wrap cleanly on word/comma boundaries rather than splitting words.
+                portrait = bytes(page.evaluate("""() => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 1200; canvas.height = 1200;
+                    const context = canvas.getContext('2d');
+                    context.fillStyle = 'blue'; context.fillRect(0, 0, 1200, 1200);
+                    return Array.from(Uint8Array.from(atob(canvas.toDataURL('image/png').split(',')[1]),
+                        character => character.charCodeAt(0)));
+                }"""))
+                effective = {
+                    "plot_type": "Profile",
+                    "date_range": {"start": "2024-05-06T10:00:00+00:00", "end": "2024-05-13T00:00:00+00:00"},
+                    "curves": [{
+                        "truth": "RAOBs (Traditional)",
+                        "region": "Continental United States",
+                        "variable": "Relative Humidity (Obs Temp)",
+                        "statistic": "RMSE (Model - Obs)",
+                        "dieoff-type": "Dieoff",
+                        "top": "1",
+                        "bottom": "1000",
+                        "averaging": "None",
+                    }],
+                }
+                wrapped_img, wrapped_meta = annotate_image(
+                    page, replace(job, statistic="rmse+bias"), portrait, effective_settings=effective,
+                )
+                self.assertGreater(wrapped_meta["header_height"], 110)
+                # Row 1 ends cleanly before "averaging=None" (width ~177px) wraps to row 2 rather than splitting mid-word.
+                line_metrics = page.evaluate("""async ({image, descPx}) => {
+                    const source = new Image(); source.src = image; await source.decode();
+                    const canvas = document.createElement('canvas');
+                    canvas.width = source.naturalWidth; canvas.height = source.naturalHeight;
+                    const context = canvas.getContext('2d'); context.drawImage(source, 0, 0);
+                    const topPad = Math.max(4, Math.round(descPx * 0.25));
+                    const lineH = Math.round(descPx * 1.32);
+                    const row1Right = context.getImageData(canvas.width - 150, topPad + lineH, 150, lineH).data;
+                    let row1RightDark = 0;
+                    for (let i = 0; i < row1Right.length; i += 4)
+                        if (row1Right[i] < 120) row1RightDark++;
+                    const row2Left = context.getImageData(12, topPad + 2 * lineH, 200, lineH).data;
+                    let row2LeftDark = 0;
+                    for (let i = 0; i < row2Left.length; i += 4)
+                        if (row2Left[i] < 120) row2LeftDark++;
+                    return {row1RightDark, row2LeftDark};
+                }""", {"image": "data:image/png;base64," + base64.b64encode(wrapped_img).decode(), "descPx": 24})
+                self.assertEqual(line_metrics["row1RightDark"], 0)
+                self.assertGreater(line_metrics["row2LeftDark"], 40)
+            finally:
+                browser.close()
+
+    def test_font_size_change_triggers_local_metadata_refresh_without_new_query(self):
+        try:
+            from playwright.sync_api import sync_playwright  # noqa: F401
+        except ImportError:
+            self.skipTest("Playwright is not installed")
+        from io import BytesIO
+        from PIL import Image
+
+        raw = example()
+        raw["plots"] = [{
+            "name": "sfc_tseries", "application": "surface", "truth": "METAR",
+            "plot_type": "time series", "region": "All HRRR domain",
+            "variable": ["t2m"], "statistic": ["rmse"], "forecast lead time": [0],
+        }]
+        plan_v9 = build_plan(raw)
+        job = plan_v9.jobs[0]
+        raw_custom = deepcopy(raw)
+        raw_custom["common"]["description font size"] = 20
+        raw_custom["common"]["legend font size"] = 22
+        plan_custom = build_plan(raw_custom)
+        custom_job = plan_custom.jobs[0]
+        self.assertEqual(job.fingerprint, custom_job.fingerprint)
+
+        # Build a v8-style cached PNG with a 60px top header above a 300px green chart.
+        v8_canvas = Image.new("RGB", (800, 360), "green")
+        v8_canvas.paste(Image.new("RGB", (800, 60), "white"), (0, 0))
+        buf = BytesIO()
+        v8_canvas.save(buf, format="PNG")
+        v8_bytes = buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            figures = root / "figures"
+            store = ResultStore(figures, plan_v9.settings.base_url)
+            store.save(job, v8_bytes, {"figure": {"width": 800, "height": 360, "header_height": 60, "legend_in_header": True}})
+            record = store.state["results"][job.relative_path]
+            record["figure_style_version"] = FIGURE_STYLE_VERSION - 1
+            record.pop("header_style", None)
+            store.flush()
+
+            self.assertFalse(store.completed(job))
+            self.assertTrue(store.completed(job, current_style=False))
+
+            with patch("automats.runner.Path.home", return_value=root), redirect_stdout(StringIO()):
+                self.assertEqual(run_plan(plan_v9, figures, metadata_only=True), 1)
+
+            store_after_v9 = ResultStore(figures, plan_v9.settings.base_url)
+            self.assertTrue(store_after_v9.completed(job))
+            fig_meta_v9 = store_after_v9.state["results"][job.relative_path]["mats"]["figure"]
+            self.assertEqual(store_after_v9.state["results"][job.relative_path]["figure_style_version"], FIGURE_STYLE_VERSION)
+            self.assertEqual(store_after_v9.state["results"][job.relative_path]["header_style"], [24, 28])
+            self.assertEqual(fig_meta_v9["height"] - fig_meta_v9["header_height"], 300)
+
+            self.assertFalse(store_after_v9.completed(custom_job))
+            self.assertTrue(store_after_v9.completed(custom_job, current_style=False))
+
+            with patch("automats.runner.Path.home", return_value=root), redirect_stdout(StringIO()):
+                self.assertEqual(run_plan(plan_custom, figures, metadata_only=True), 1)
+                self.assertEqual(run_plan(plan_custom, figures, metadata_only=True), 0)
+
+            store_after_custom = ResultStore(figures, plan_custom.settings.base_url)
+            self.assertTrue(store_after_custom.completed(custom_job))
+            fig_meta_custom = store_after_custom.state["results"][custom_job.relative_path]["mats"]["figure"]
+            self.assertEqual(store_after_custom.state["results"][custom_job.relative_path]["header_style"], [20, 22])
+            self.assertEqual(fig_meta_custom["height"] - fig_meta_custom["header_height"], 300)
+            self.assertLess(fig_meta_custom["header_height"], fig_meta_v9["header_height"])
 
 
 class ControlPacingTests(unittest.TestCase):
@@ -1945,6 +2132,80 @@ class SlideTests(unittest.TestCase):
             self.assertLessEqual(captions[1].left, second.left)
             self.assertGreaterEqual(captions[1].left, first.left + first.width)
 
+    def test_multi_column_rows_use_single_caption_reserve_without_overlap(self):
+        from PIL import Image
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from pptx.util import Inches
+
+        raw = example()
+        raw["plots"][0]["forecast lead time"] = [0]
+        raw["slides"] = [
+            {
+                "plot group": "ua_profile",
+                "title": "Two Column Landscape",
+                "number of rows": 2,
+                "row1": ["T_rmse_f000", "RHobT_rmse_f000"],
+                "row2": ["Wind_rmse_f000"],
+            },
+            {
+                "plot group": "ua_profile",
+                "title": "Three Column Portrait",
+                "number of rows": 2,
+                "row1": ["T_rmse_f000", "RHobT_rmse_f000", "Wind_rmse_f000"],
+                "row2": ["T_bias_f000", "RHobT_bias_f000", "Wind_bias_f000"],
+            },
+        ]
+        plan = build_plan(raw)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            for job in plan.jobs:
+                path = output / job.relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                dims = (1600, 989) if job.statistic == "rmse" and job.variable != "Wind" or job.variable == "Wind" else (1200, 1289)
+                Image.new("RGB", dims, "navy").save(path, format="PNG")
+            # Ensure slide 2 uses 3 portrait/square figures cleanly too.
+            for job in plan.jobs:
+                if job.statistic == "bias":
+                    Image.new("RGB", (1200, 1289), "teal").save(output / job.relative_path, format="PNG")
+            deck = Presentation(build_slides(plan, output))
+
+            margin = Inches(0.25)
+            gap = Inches(0.12)
+            caption_reserve = Inches(0.65) + Inches(0.08)
+
+            # Slide 1 (index 1): 2-column landscape row utilizes single-side caption reserve.
+            two_col = deck.slides[1]
+            pics_2 = [s for s in two_col.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            caps_2 = [s for s in two_col.shapes if s.name.startswith("Caption ")]
+            cell_width_2 = (deck.slide_width - 2 * margin - gap) // 2
+            self.assertGreater(pics_2[0].width, cell_width_2 - 2 * caption_reserve)
+            self.assertLessEqual(pics_2[0].width, cell_width_2 - caption_reserve)
+            self.assertGreaterEqual(caps_2[0].left, margin)
+            self.assertGreaterEqual(caps_2[1].left, pics_2[0].left + pics_2[0].width + gap - 2)
+            self.assertAlmostEqual(pics_2[2].left + pics_2[2].width / 2, deck.slide_width / 2, delta=2)
+
+            # Rewrite Wind_rmse_f000 as portrait/square 1200x1289 and rebuild to test 3-column clamping.
+            for job in plan.jobs:
+                if job.statistic == "rmse":
+                    Image.new("RGB", (1200, 1289), "navy").save(output / job.relative_path, format="PNG")
+            deck = Presentation(build_slides(plan, output))
+            three_col = deck.slides[2]
+            pics_3 = [s for s in three_col.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            caps_3 = [s for s in three_col.shapes if s.name.startswith("Caption ")]
+            for row_idx in range(2):
+                row_pics = pics_3[row_idx * 3:(row_idx + 1) * 3]
+                row_caps = caps_3[row_idx * 3:(row_idx + 1) * 3]
+                self.assertGreaterEqual(row_caps[0].left, margin)
+                self.assertLessEqual(row_pics[2].left + row_pics[2].width, deck.slide_width - margin)
+                for col_idx in range(3):
+                    self.assertLessEqual(row_caps[col_idx].left + row_caps[col_idx].width, row_pics[col_idx].left)
+                    if col_idx > 0:
+                        self.assertGreaterEqual(
+                            row_caps[col_idx].left,
+                            row_pics[col_idx - 1].left + row_pics[col_idx - 1].width + gap - 2,
+                        )
+
     def test_multiple_slides_and_different_image_shapes(self):
         from PIL import Image
         from pptx import Presentation
@@ -2161,6 +2422,75 @@ class SlideTests(unittest.TestCase):
             self.assertIn(f"Saved 0 MATS figures under {output.resolve()}", text)
             self.assertIn(f"Saved 2 graphics under {(output / 'graphics').resolve()}", text)
             self.assertIn(f"Saved slides to {(output / 'slides.pptx').resolve()}", text)
+
+    def test_cli_prints_warnings_before_final_saved_slides_message(self):
+        from automats.config import PygrafGraphicsConfig
+
+        pygraf_plan = replace(
+            self.plan,
+            pygraf_graphics=PygrafGraphicsConfig(enable=True, recipe="graphics.yaml"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+
+            def fake_run(plan, out_dir, *args, failures=None, **kwargs):
+                if failures is not None:
+                    failures.append((plan.jobs[0], "MATS error"))
+                return 0
+
+            def fake_build_slides(plan, out_dir, *, log=None, missing=None, graphics_stats=None):
+                if missing is not None:
+                    missing.append((plan.jobs[0].relative_path, "missing PNG"))
+                if graphics_stats is not None:
+                    graphics_stats["saved"] = 1
+                return out_dir / "slides.pptx"
+
+            combined = StringIO()
+            with patch("automats.cli.load_plan", return_value=pygraf_plan), \
+                    patch("automats.cli.run_plan", side_effect=fake_run), \
+                    patch("automats.cli.build_slides", side_effect=fake_build_slides), \
+                    redirect_stdout(combined), redirect_stderr(combined):
+                code = main(
+                    ["recipe.yaml", "--output-dir", str(output)],
+                    pre_slides_warnings=["Warning: extra wrapper warning."],
+                )
+
+            self.assertEqual(code, 0)
+            lines = [line for line in combined.getvalue().splitlines() if line.strip()]
+            self.assertEqual(
+                lines[-7:],
+                [
+                    f"Saved 0 MATS figures under {output.resolve()}",
+                    f"Saved 1 graphics under {(output / 'graphics').resolve()}",
+                    "Warning: Skipped 1 failed MATS plot(s):",
+                    f"  - {self.plan.jobs[0].relative_path}: MATS error",
+                    "Warning: Used placeholders for 1 missing/unreadable MATS figure(s).",
+                    "Warning: extra wrapper warning.",
+                    f"Saved slides to {(output / 'slides.pptx').resolve()}",
+                ],
+            )
+
+            # Same guarantee holds in --slides-only mode
+            combined_slides_only = StringIO()
+            with patch("automats.cli.load_plan", return_value=pygraf_plan), \
+                    patch("automats.cli.build_slides", side_effect=fake_build_slides), \
+                    redirect_stdout(combined_slides_only), redirect_stderr(combined_slides_only):
+                code2 = main(
+                    ["recipe.yaml", "--slides-only", "--output-dir", str(output)],
+                    pre_slides_warnings=["Warning: extra wrapper warning."],
+                )
+
+            self.assertEqual(code2, 0)
+            lines2 = [line for line in combined_slides_only.getvalue().splitlines() if line.strip()]
+            self.assertEqual(
+                lines2[-4:],
+                [
+                    f"Saved 1 graphics under {(output / 'graphics').resolve()}",
+                    "Warning: Used placeholders for 1 missing/unreadable MATS figure(s).",
+                    "Warning: extra wrapper warning.",
+                    f"Saved slides to {(output / 'slides.pptx').resolve()}",
+                ],
+            )
 
 
 class CliTests(unittest.TestCase):

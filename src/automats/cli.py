@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 import math
 from pathlib import Path
 import shutil
@@ -99,7 +100,8 @@ class ProgressDisplay:
             self.stream.flush()
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, pre_slides_warnings: Iterable[str] | None = None) -> int:
+    extra_warnings = [str(w) for w in (pre_slides_warnings or ()) if w]
     parser = argparse.ArgumentParser(description="YAML-driven MATS verification plots")
     parser.add_argument("recipe", type=Path, help="YAML plotting recipe")
     parser.add_argument("--output-dir", type=Path, default=Path("figures"), help="Output directory (default: ./figures)")
@@ -137,8 +139,11 @@ def main(argv=None) -> int:
                 print(f"{len(plan.slides)} slides: {args.output_dir / 'slides.pptx'}")
             if plan.pygraf_graphics and plan.pygraf_graphics.enable:
                 print(f"pygraf graphics slides enabled ({plan.pygraf_graphics.recipe}): {args.output_dir / 'slides.pptx'}")
+            sys.stdout.flush()
             if plan.slide_error is not None:
-                print(f"Warning: Slide generation disabled: {plan.slide_error}", file=sys.stderr)
+                print(f"Warning: Slide generation disabled: {plan.slide_error}", file=sys.stderr, flush=True)
+            for warning in extra_warnings:
+                print(warning, file=sys.stderr, flush=True)
             return 0
         if args.slides_only:
             missing_figures: list[tuple[str, str]] = []
@@ -154,13 +159,16 @@ def main(argv=None) -> int:
                     f"Saved {graphics_stats['saved']} graphics under {(args.output_dir / 'graphics').resolve()}",
                     flush=True,
                 )
-            print(f"Saved slides to {deck.resolve()}", flush=True)
             if missing_figures:
                 unique_missing = len({path for path, _ in missing_figures})
                 print(
                     f"Warning: Used placeholders for {unique_missing} missing/unreadable MATS figure(s).",
                     file=sys.stderr,
+                    flush=True,
                 )
+            for warning in extra_warnings:
+                print(warning, file=sys.stderr, flush=True)
+            print(f"Saved slides to {deck.resolve()}", flush=True)
             return 0
         deck = None
         failed_plots: list[tuple[object, str]] = []
@@ -193,17 +201,20 @@ def main(argv=None) -> int:
                 flush=True,
             )
         if failed_plots:
-            print(f"Warning: Skipped {len(failed_plots)} failed MATS plot(s):", file=sys.stderr)
+            print(f"Warning: Skipped {len(failed_plots)} failed MATS plot(s):", file=sys.stderr, flush=True)
             for failed_job, reason in failed_plots:
-                print(f"  - {failed_job.relative_path}: {reason}", file=sys.stderr)
-        if deck is not None:
-            print(f"Saved slides to {deck.resolve()}", flush=True)
+                print(f"  - {failed_job.relative_path}: {reason}", file=sys.stderr, flush=True)
         if missing_figures:
             unique_missing = len({path for path, _ in missing_figures})
             print(
                 f"Warning: Used placeholders for {unique_missing} missing/unreadable MATS figure(s).",
                 file=sys.stderr,
+                flush=True,
             )
+        for warning in extra_warnings:
+            print(warning, file=sys.stderr, flush=True)
+        if deck is not None:
+            print(f"Saved slides to {deck.resolve()}", flush=True)
         return 0
     except KeyboardInterrupt:
         print("Interrupted. Completed figures are retained for resume.", file=sys.stderr)

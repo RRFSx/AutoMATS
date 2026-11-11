@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run baseline comparison: compare <expname> against Gaea C6 baseline."""
 
+import inspect
 import os
 from pathlib import Path
 import re
@@ -187,14 +188,21 @@ def main(argv=None):
     if not has_output_dir:
         forward_args.extend(["--output-dir", str(ROOT / "results" / f"baseline_c6_{expname}")])
 
-    rc = automats_main([str(tmp_recipe)] + forward_args)
-    if rc == 0 and not resolved_comroot:
-        sys.stdout.flush()
-        print(
-            f"Warning: no pygraf graphics downloaded for '{expname}' as hpc_dir is missing.",
-            file=sys.stderr,
-            flush=True,
+    pre_slides_warnings = []
+    if not resolved_comroot:
+        pre_slides_warnings.append(
+            f"Warning: no pygraf graphics downloaded for '{expname}' as hpc_dir is missing."
         )
+
+    cli_args = [str(tmp_recipe)] + forward_args
+    if pre_slides_warnings and "pre_slides_warnings" in inspect.signature(automats_main).parameters:
+        rc = automats_main(cli_args, pre_slides_warnings=pre_slides_warnings)
+    else:
+        rc = automats_main(cli_args)
+        if rc == 0 and pre_slides_warnings:
+            sys.stdout.flush()
+            for warning in pre_slides_warnings:
+                print(warning, file=sys.stderr, flush=True)
     return rc
 
 

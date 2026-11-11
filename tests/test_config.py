@@ -2,7 +2,12 @@ from copy import deepcopy
 from pathlib import Path
 import unittest
 
-from automats.config import ConfigError, build_plan
+from automats.config import (
+    ConfigError,
+    DEFAULT_DESCRIPTION_FONT_SIZE,
+    DEFAULT_LEGEND_FONT_SIZE,
+    build_plan,
+)
 
 
 def example():
@@ -699,6 +704,48 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(build_plan(raw).title, "RRFSv2 Verification Study")
         raw["title"] = "   "
         with self.assertRaises(ConfigError):
+            build_plan(raw)
+
+    def test_common_font_sizes_default_and_preserve_fingerprint(self):
+        base = build_plan(example())
+        self.assertEqual(DEFAULT_DESCRIPTION_FONT_SIZE, 24)
+        self.assertEqual(DEFAULT_LEGEND_FONT_SIZE, 28)
+        self.assertTrue(all(
+            (job.description_font_size, job.legend_font_size) == (24, 28)
+            for job in base.jobs
+        ))
+        original_fingerprints = [job.fingerprint for job in base.jobs]
+
+        for desc_key, leg_key, desc_val, leg_val in (
+            ("description font size", "legend font size", 26, 30),
+            ("description_font_size", "legend_font_size", 18.5, 22),
+            ("description font size", "legend_font_size", 4, 72),
+        ):
+            raw = example()
+            raw["common"][desc_key] = desc_val
+            raw["common"][leg_key] = leg_val
+            with self.subTest(desc_key=desc_key, leg_key=leg_key, desc_val=desc_val, leg_val=leg_val):
+                plan = build_plan(raw)
+                self.assertTrue(all(
+                    (job.description_font_size, job.legend_font_size) == (desc_val, leg_val)
+                    for job in plan.jobs
+                ))
+                self.assertEqual([job.fingerprint for job in plan.jobs], original_fingerprints)
+
+    def test_common_rejects_invalid_and_conflicting_font_sizes(self):
+        for name in ("description font size", "description_font_size", "legend font size", "legend_font_size"):
+            for value in (0, -1, 3.9, 72.1, True, False, "24", None, float("nan"), float("inf")):
+                raw = example()
+                raw["common"][name] = value
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ConfigError, "font size"):
+                    build_plan(raw)
+        raw = example()
+        raw["common"].update({"description font size": 24, "description_font_size": 24})
+        with self.assertRaisesRegex(ConfigError, "description font size"):
+            build_plan(raw)
+        raw = example()
+        raw["common"].update({"legend font size": 28, "legend_font_size": 28})
+        with self.assertRaisesRegex(ConfigError, "legend font size"):
             build_plan(raw)
 
 

@@ -12,7 +12,12 @@ import re
 import time
 from urllib.parse import urljoin, urlsplit
 
-from automats.config import PlotJob, STATISTICS, VARIABLES, VARIABLE_ALIASES
+from automats.config import (
+    PlotJob,
+    STATISTICS,
+    VARIABLES,
+    VARIABLE_ALIASES,
+)
 from automats.runner import FatalRunError, ResolutionError, RunError, is_png, resolve_option, validate_effective_curves
 
 
@@ -92,8 +97,8 @@ def figure_header(job: PlotJob, effective: dict | None = None) -> list[str]:
     ]
 
 
-ANNOTATE_IMAGE = """async ({image, header, experiments, diffExperiments=[], sourceTop, removeOldLegend, clearDisclaimer,
-    lineWeight=2, markerWeight=7}) => {
+ANNOTATE_IMAGE = r"""async ({image, header, experiments, diffExperiments=[], sourceTop, removeOldLegend, clearDisclaimer,
+    lineWeight=2, markerWeight=7, descriptionFontSize=24, legendFontSize=28}) => {
     for (const item of [...experiments, ...(diffExperiments || [])])
         if (!CSS.supports('color', item.color)) throw Error('Invalid plot color: ' + item.color);
     const source = new Image();
@@ -121,45 +126,84 @@ ANNOTATE_IMAGE = """async ({image, header, experiments, diffExperiments=[], sour
     }
     const chartHeight = source.naturalHeight - sourceTop;
     if (chartHeight <= 0) throw Error('Invalid previous metadata header height');
-    const padding = 12;
+    const descPx = Number(descriptionFontSize) > 0 ? Number(descriptionFontSize) : 24;
+    const legPx = Number(legendFontSize) > 0 ? Number(legendFontSize) : 28;
+    const padding = Math.max(12, Math.round(Math.max(descPx, legPx) * 0.5));
     const availableWidth = canvas.width - 2 * padding;
-    const font = '16px sans-serif';
-    context.font = font;
-    const wrap = (text, width) => {
+    const descFont = `${descPx}px sans-serif`;
+    const legFont = `600 ${legPx}px sans-serif`;
+    const descLineHeight = Math.round(descPx * 1.32);
+    const legLineHeight = Math.round(legPx * 1.36);
+    const symbolLineLen = Math.max(30, Math.round(legPx * 1.55));
+    const symbolGap = Math.max(8, Math.round(legPx * 0.35));
+    const symbolWidth = symbolLineLen + symbolGap;
+    const itemGap = Math.max(18, Math.round(legPx * 0.9));
+    const swatchLine = Math.max(lineWeight, Math.round(lineWeight * Math.max(1, legPx / 22)));
+    const swatchMarker = Math.max(markerWeight, Math.round(markerWeight * Math.max(1, legPx / 22)));
+
+    const wrap = (text, width, fontSpec) => {
+        context.font = fontSpec;
+        const tokens = text.split(/(,\s+|\s+)/).filter(Boolean);
         const lines = [];
         let line = '';
-        for (const character of text) {
-            if (line && context.measureText(line + character).width > width) {
-                lines.push(line); line = '';
+        for (const token of tokens) {
+            if (!line && /^\s+$/.test(token)) continue;
+            const candidate = line + token;
+            if (line && context.measureText(candidate).width > width) {
+                lines.push(line.trimEnd());
+                line = token.trimStart();
+            } else {
+                line = candidate;
             }
-            line += character;
+            while (line && context.measureText(line).width > width) {
+                let cut = line.length - 1;
+                while (cut > 1 && context.measureText(line.slice(0, cut)).width > width) cut--;
+                lines.push(line.slice(0, cut));
+                line = line.slice(cut);
+            }
         }
-        lines.push(line);
+        if (line.trim()) lines.push(line.trimEnd());
+        if (!lines.length) lines.push('');
         return lines;
     };
     const rows = [];
     for (const text of header) {
-        rows.push(...wrap(text, availableWidth));
+        rows.push(...wrap(text, availableWidth, descFont));
     }
-    const symbolWidth = 38;
 
     const layoutGroup = (items, startY) => {
-        const widths = items.map(item => context.measureText(item.name).width + symbolWidth + 18);
-        const stacked = widths.reduce((total, width) => total + width, 0) > availableWidth;
+        if (!items || !items.length) return {placed: [], height: 0, rows: 0};
+        context.font = legFont;
         const placed = [];
-        let groupHeight = 0;
-        let horizontalOffset = 0;
-        for (const [index, item] of items.entries()) {
-            const lines = wrap(item.name, availableWidth - symbolWidth);
-            placed.push({
-                item, lines,
-                x: stacked ? padding : padding + horizontalOffset,
-                y: startY + (stacked ? groupHeight : 0)
-            });
-            if (stacked) groupHeight += lines.length * 24;
-            else { groupHeight = 24; horizontalOffset += widths[index]; }
+        let curX = 0;
+        let curY = startY;
+        let rowCount = 1;
+        let rowMaxH = 0;
+        const maxItemTextWidth = Math.max(40, availableWidth - symbolWidth);
+        for (const [idx, item] of items.entries()) {
+            const lines = wrap(item.name, maxItemTextWidth, legFont);
+            const maxLineW = Math.max(...lines.map(line => context.measureText(line).width));
+            const itemWidth = symbolWidth + maxLineW + itemGap;
+            const itemHeight = lines.length * legLineHeight;
+            if (curX > 0 && (lines.length > 1 || curX + (itemWidth - itemGap) > availableWidth)) {
+                curY += rowMaxH;
+                curX = 0;
+                rowMaxH = 0;
+                rowCount++;
+            }
+            placed.push({item, lines, x: padding + curX, y: curY});
+            rowMaxH = Math.max(rowMaxH, itemHeight);
+            if (lines.length > 1 && idx < items.length - 1) {
+                curY += rowMaxH;
+                curX = 0;
+                rowMaxH = 0;
+                rowCount++;
+            } else if (lines.length === 1) {
+                curX += itemWidth;
+            }
         }
-        return {placed, height: groupHeight || 24, rows: stacked ? groupHeight / 24 : 1};
+        const totalH = (curY - startY) + rowMaxH;
+        return {placed, height: totalH || legLineHeight, rows: rowCount};
     };
 
     const primaryLayout = layoutGroup(experiments, 0);
@@ -168,37 +212,43 @@ ANNOTATE_IMAGE = """async ({image, header, experiments, diffExperiments=[], sour
     let allPlaced = [...primaryLayout.placed];
 
     if (diffExperiments && diffExperiments.length > 0) {
-        const diffLayout = layoutGroup(diffExperiments, primaryLayout.height + 4);
-        totalLegendHeight = primaryLayout.height + 4 + diffLayout.height;
+        const diffGap = Math.max(4, Math.round(legPx * 0.2));
+        const diffLayout = layoutGroup(diffExperiments, primaryLayout.height + diffGap);
+        totalLegendHeight = primaryLayout.height + diffGap + diffLayout.height;
         totalRows += diffLayout.rows;
         allPlaced.push(...diffLayout.placed);
     }
 
-    const metadataHeight = 4 + rows.length * 22;
-    const legendTop = metadataHeight + 4;
-    const headerHeight = legendTop + totalLegendHeight + 6;
+    const topPad = Math.max(4, Math.round(descPx * 0.25));
+    const sectionGap = Math.max(4, Math.round(Math.max(descPx, legPx) * 0.2));
+    const bottomPad = Math.max(6, Math.round(legPx * 0.25));
+    const metadataHeight = topPad + rows.length * descLineHeight;
+    const legendTop = metadataHeight + sectionGap;
+    const headerHeight = legendTop + totalLegendHeight + bottomPad;
     canvas.height = chartHeight + headerHeight;
     context.fillStyle = 'white';
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = '#202020';
     context.textBaseline = 'top';
-    context.font = font;
-    let position = 4;
+    context.font = descFont;
+    let position = topPad;
     for (const row of rows) {
         context.fillText(row, padding, position);
-        position += 22;
+        position += descLineHeight;
     }
+    context.font = legFont;
+    context.textBaseline = 'middle';
     for (const entry of allPlaced) {
-        const position = legendTop + entry.y;
+        const lineMidY = legendTop + entry.y + legLineHeight / 2;
         context.strokeStyle = entry.item.color;
         context.fillStyle = entry.item.color;
-        context.lineWidth = lineWeight;
-        context.beginPath(); context.moveTo(entry.x, position + 12);
-        context.lineTo(entry.x + 30, position + 12); context.stroke();
-        context.beginPath(); context.arc(entry.x + 15, position + 12, markerWeight / 2, 0, 2 * Math.PI); context.fill();
+        context.lineWidth = swatchLine;
+        context.beginPath(); context.moveTo(entry.x, lineMidY);
+        context.lineTo(entry.x + symbolLineLen, lineMidY); context.stroke();
+        context.beginPath(); context.arc(entry.x + symbolLineLen / 2, lineMidY, swatchMarker / 2, 0, 2 * Math.PI); context.fill();
         context.fillStyle = '#202020';
         for (const [index, line] of entry.lines.entries())
-            context.fillText(line, entry.x + symbolWidth, position + 4 + index * 24);
+            context.fillText(line, entry.x + symbolWidth, legendTop + entry.y + legLineHeight / 2 + index * legLineHeight);
     }
     context.drawImage(source, 0, sourceTop, source.naturalWidth, chartHeight,
         0, headerHeight, canvas.width, chartHeight);
@@ -210,7 +260,9 @@ ANNOTATE_IMAGE = """async ({image, header, experiments, diffExperiments=[], sour
     return {image:canvas.toDataURL('image/png'), width:canvas.width,
             height:canvas.height, header_height:headerHeight,
             legend_rows:totalRows, legend_in_header:true,
-            legend_names:allNames};
+            legend_names:allNames,
+            description_font_size:descPx,
+            legend_font_size:legPx};
 }"""
 
 
@@ -302,12 +354,15 @@ def annotate_image(page, job: PlotJob, image: bytes, previous_figure: dict | Non
         "clearDisclaimer": bool((previous_figure or {}).get("disclaimer")),
         "lineWeight": job.line_weight,
         "markerWeight": job.marker_weight,
+        "descriptionFontSize": job.description_font_size,
+        "legendFontSize": job.legend_font_size,
     })
     prefix = "data:image/png;base64,"
     if not rendered["image"].startswith(prefix):
         raise RunError("Metadata rendering did not return a PNG")
     metadata = {key: rendered[key] for key in (
-        "width", "height", "header_height", "legend_rows", "legend_in_header", "legend_names")}
+        "width", "height", "header_height", "legend_rows", "legend_in_header", "legend_names",
+        "description_font_size", "legend_font_size")}
     metadata["header"] = header
     metadata["legend_styles"] = ["solid"]
     metadata["line_weight"] = job.line_weight

@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from automats.cli import main as automats_main
 
 BASELINE_EXPERIMENT = "RRFSv2_conus_3km_ret_v2x_retv4"
+BASELINE_HPC_DIR = "/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4"
 
 
 def resolve_comroot(hpc_dir: str) -> str:
@@ -64,7 +65,7 @@ def usage(error_msg=None):
         "  - /gpfs/f6/... -> gaeac6:/gpfs/f6/...\n"
         "  - /gpfs/f7/... -> gaeac7:/gpfs/f7/...\n"
         "  - <cluster>:/path -> preserved as-is (e.g. ursa:/scratch3/...)\n"
-        "If [hpc_dir] is omitted, no graphics are downloaded (pygraf graphics slides disabled).\n"
+        "If [hpc_dir] is omitted, no graphics are downloaded for <expname> (baseline and obs graphics still download).\n"
         "Reuses recipes/baseline.yaml by overwriting its experiments section and saving a temporary\n"
         "recipe under ./tmp/.\n"
         "\n"
@@ -162,23 +163,15 @@ def main(argv=None):
     with open(baseline_recipe, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
-    # Find existing definitions in baseline.yaml if present to preserve COMROOT, etc.
-    existing_by_name = {
-        exp["name"]: exp for exp in data.get("experiments", []) if isinstance(exp, dict) and "name" in exp
+    base_exp = {
+        "name": BASELINE_EXPERIMENT,
+        "color": "red",
+        "COMROOT": resolve_comroot(BASELINE_HPC_DIR),
     }
-
-    base_exp = dict(existing_by_name.get(BASELINE_EXPERIMENT, {"name": BASELINE_EXPERIMENT}))
-    base_exp["color"] = "red"
 
     target_exp = {"name": expname, "color": "blue"}
     if resolved_comroot:
         target_exp["COMROOT"] = resolved_comroot
-    else:
-        # Without an input hpc_dir, there are no graphics to download for this comparison
-        if isinstance(data.get("pygraf graphics slides"), dict):
-            data["pygraf graphics slides"]["enable"] = False
-        else:
-            data["pygraf graphics slides"] = {"enable": False}
 
     # Overwrite experiments for C6 baseline comparison (baseline first, then target experiment)
     data["experiments"] = [base_exp, target_exp]
@@ -194,7 +187,15 @@ def main(argv=None):
     if not has_output_dir:
         forward_args.extend(["--output-dir", str(ROOT / "results" / f"baseline_c6_{expname}")])
 
-    return automats_main([str(tmp_recipe)] + forward_args)
+    rc = automats_main([str(tmp_recipe)] + forward_args)
+    if rc == 0 and not resolved_comroot:
+        sys.stdout.flush()
+        print(
+            f"Warning: no pygraf graphics downloaded for '{expname}' as hpc_dir is missing.",
+            file=sys.stderr,
+            flush=True,
+        )
+    return rc
 
 
 if __name__ == "__main__":

@@ -479,6 +479,8 @@ class BaselineC6Tests(unittest.TestCase):
             baselinec6.resolve_comroot("/scratch3/no_cluster_prefix")
 
     def test_main_positional_expname_and_hpc_dir(self):
+        from contextlib import redirect_stderr
+        import io
         from unittest.mock import patch
         import yaml
 
@@ -492,9 +494,11 @@ class BaselineC6Tests(unittest.TestCase):
                 captured["args"] = cli_args
                 return 0
 
+            stderr_buf = io.StringIO()
             with (
                 patch.object(baselinec6, "ROOT", root),
                 patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
+                redirect_stderr(stderr_buf),
             ):
                 rc = baselinec6.main([
                     "my_mats_exp",
@@ -503,6 +507,7 @@ class BaselineC6Tests(unittest.TestCase):
                 ])
 
             self.assertEqual(rc, 0)
+            self.assertEqual(stderr_buf.getvalue(), "")
             tmp_recipe = Path(captured["args"][0])
             self.assertEqual(tmp_recipe, root / "tmp" / "baseline_c6_my_mats_exp.yaml")
             self.assertEqual(
@@ -513,6 +518,10 @@ class BaselineC6Tests(unittest.TestCase):
             data = yaml.safe_load(tmp_recipe.read_text(encoding="utf-8"))
             self.assertEqual(len(data["experiments"]), 2)
             self.assertEqual(data["experiments"][0]["name"], "RRFSv2_conus_3km_ret_v2x_retv4")
+            self.assertEqual(
+                data["experiments"][0]["COMROOT"],
+                "gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4",
+            )
             self.assertEqual(data["experiments"][1]["name"], "my_mats_exp")
             self.assertEqual(data["experiments"][1]["color"], "blue")
             self.assertEqual(
@@ -522,6 +531,8 @@ class BaselineC6Tests(unittest.TestCase):
             self.assertTrue(data["pygraf graphics slides"]["enable"])
 
     def test_main_f7_with_leading_options_and_flags(self):
+        from contextlib import redirect_stderr
+        import io
         from unittest.mock import patch
         import yaml
 
@@ -535,9 +546,11 @@ class BaselineC6Tests(unittest.TestCase):
                 captured["args"] = cli_args
                 return 0
 
+            stderr_buf = io.StringIO()
             with (
                 patch.object(baselinec6, "ROOT", root),
                 patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
+                redirect_stderr(stderr_buf),
             ):
                 rc = baselinec6.main([
                     "--output-dir", str(root / "custom_out"),
@@ -547,6 +560,7 @@ class BaselineC6Tests(unittest.TestCase):
                 ])
 
             self.assertEqual(rc, 0)
+            self.assertEqual(stderr_buf.getvalue(), "")
             tmp_recipe = Path(captured["args"][0])
             data = yaml.safe_load(tmp_recipe.read_text(encoding="utf-8"))
             self.assertEqual(data["experiments"][1]["name"], "my_f7_exp")
@@ -560,9 +574,11 @@ class BaselineC6Tests(unittest.TestCase):
             )
 
             # Flag form --hpc-dir / --comroot also resolves /gpfs/f6 and /gpfs/f7
+            stderr_buf2 = io.StringIO()
             with (
                 patch.object(baselinec6, "ROOT", root),
                 patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
+                redirect_stderr(stderr_buf2),
             ):
                 rc2 = baselinec6.main([
                     "--expname", "existing_other",
@@ -570,6 +586,7 @@ class BaselineC6Tests(unittest.TestCase):
                 ])
 
             self.assertEqual(rc2, 0)
+            self.assertEqual(stderr_buf2.getvalue(), "")
             data2 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
             self.assertEqual(
                 data2["experiments"][1]["COMROOT"],
@@ -592,7 +609,10 @@ class BaselineC6Tests(unittest.TestCase):
                 # Extra unexpected positional argument
                 self.assertEqual(baselinec6.main(["my_exp", "/gpfs/f6/some/path", "extra"]), 1)
 
-    def test_main_omitted_hpc_dir_disables_graphics_download(self):
+    def test_main_omitted_hpc_dir_skips_target_comroot_keeps_baseline_graphics(self):
+        from contextlib import redirect_stderr, redirect_stdout
+        import io
+        import sys
         from unittest.mock import patch
         import yaml
 
@@ -604,23 +624,98 @@ class BaselineC6Tests(unittest.TestCase):
 
             def fake_automats_main(cli_args):
                 captured["args"] = cli_args
+                print("Saved slides to /tmp/slides.pptx")
+                print("AutoMATS stderr detail", file=sys.stderr)
+                return 0
+
+            out1 = io.StringIO()
+            err1 = io.StringIO()
+            combined1 = io.StringIO()
+            combined2 = io.StringIO()
+            with (
+                patch.object(baselinec6, "ROOT", root),
+                patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
+            ):
+                # Capture combined stream to verify ordering across stdout and stderr
+                with redirect_stdout(combined1), redirect_stderr(combined1):
+                    rc1 = baselinec6.main(["existing_other", "--plan"])
+                data1 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
+                with redirect_stdout(combined2), redirect_stderr(combined2):
+                    rc2 = baselinec6.main(["brand_new_exp", "--plan"])
+                data2 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
+                # Also verify stderr separately and check warning isn't emitted on failure exit code
+                with redirect_stdout(out1), redirect_stderr(err1):
+                    rc3 = baselinec6.main(["brand_new_exp", "--plan"])
+
+            self.assertEqual(rc1, 0)
+            self.assertEqual(
+                data1["experiments"][0]["COMROOT"],
+                "gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4",
+            )
+            self.assertNotIn("COMROOT", data1["experiments"][1])
+            self.assertTrue(data1["pygraf graphics slides"]["enable"])
+            lines1 = [line for line in combined1.getvalue().splitlines() if line.strip()]
+            self.assertEqual(
+                lines1,
+                [
+                    "Saved slides to /tmp/slides.pptx",
+                    "AutoMATS stderr detail",
+                    "Warning: no pygraf graphics downloaded for 'existing_other' as hpc_dir is missing.",
+                ],
+            )
+
+            self.assertEqual(rc2, 0)
+            self.assertNotIn("COMROOT", data2["experiments"][1])
+            self.assertTrue(data2["pygraf graphics slides"]["enable"])
+            lines2 = [line for line in combined2.getvalue().splitlines() if line.strip()]
+            self.assertEqual(
+                lines2[-1],
+                "Warning: no pygraf graphics downloaded for 'brand_new_exp' as hpc_dir is missing.",
+            )
+            self.assertEqual(rc3, 0)
+            self.assertEqual(
+                err1.getvalue().splitlines()[-1],
+                "Warning: no pygraf graphics downloaded for 'brand_new_exp' as hpc_dir is missing.",
+            )
+
+    def test_main_uses_baseline_hpc_dir_even_if_baseline_yaml_lacks_it(self):
+        from unittest.mock import patch
+        import yaml
+
+        baselinec6 = self._import_baselinec6()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "recipes").mkdir(parents=True, exist_ok=True)
+            (root / "recipes" / "baseline.yaml").write_text(
+                "experiments:\n"
+                "- name: unrelated\n"
+                "  color: orange\n"
+                "pygraf graphics slides:\n"
+                "  enable: true\n"
+                "  recipe: graphics_slides_layout2_May2024.yaml\n",
+                encoding="utf-8",
+            )
+            captured = {}
+
+            def fake_automats_main(cli_args):
+                captured["args"] = cli_args
                 return 0
 
             with (
                 patch.object(baselinec6, "ROOT", root),
                 patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
             ):
-                rc1 = baselinec6.main(["existing_other", "--plan"])
-                data1 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
-                rc2 = baselinec6.main(["brand_new_exp", "--plan"])
-                data2 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
+                rc = baselinec6.main(["my_exp", "/gpfs/f7/some/com/rrfs/v2"])
 
-            self.assertEqual(rc1, 0)
-            self.assertNotIn("COMROOT", data1["experiments"][1])
-            self.assertFalse(data1["pygraf graphics slides"]["enable"])
-            self.assertEqual(rc2, 0)
-            self.assertNotIn("COMROOT", data2["experiments"][1])
-            self.assertFalse(data2["pygraf graphics slides"]["enable"])
+            self.assertEqual(rc, 0)
+            data = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(data["experiments"][0]["name"], baselinec6.BASELINE_EXPERIMENT)
+            self.assertEqual(
+                data["experiments"][0]["COMROOT"],
+                baselinec6.resolve_comroot(baselinec6.BASELINE_HPC_DIR),
+            )
+            self.assertEqual(data["experiments"][1]["COMROOT"], "gaeac7:/gpfs/f7/some/com/rrfs/v2")
 
 
 if __name__ == "__main__":

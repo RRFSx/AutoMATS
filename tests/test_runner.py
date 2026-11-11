@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 from automats.config import Settings, STATISTICS, build_plan
 from automats.browser import EXPORT_IMAGE, Throttled, UpperAirBrowser, annotate_image, discover_applications, figure_header, minimize_window, resolve_application, retry_after_seconds
 from automats.cli import ProgressDisplay, main
-from automats.runner import CHROMIUM_ARGS, CHROMIUM_IGNORE_DEFAULT_ARGS, DEFAULT_USER_AGENT, PNG_SIGNATURE, QueryPacer, ResolutionError, ResultStore, RunError, figure_exists, is_png, lock_error, resolve_option, run_plan, validate_curves, validate_effective_curves
+from automats.runner import CHROMIUM_ARGS, CHROMIUM_IGNORE_DEFAULT_ARGS, DEFAULT_USER_AGENT, FatalRunError, PNG_SIGNATURE, QueryPacer, ResolutionError, ResultStore, RunError, figure_exists, is_png, lock_error, resolve_option, run_plan, validate_curves, validate_effective_curves
 from automats.slides import SlideError, build_slides
 from test_config import example
 
@@ -466,12 +466,29 @@ class ResultTests(unittest.TestCase):
                                wall_clock=lambda: 10000 + clock.now)
             pacer.before_query()
             original = state_path.read_bytes()
+            failures = []
             with patch("automats.runner.Path.home", return_value=root), \
                     patch("automats.runner.QueryPacer", return_value=pacer), \
                     patch("playwright.sync_api.sync_playwright"), \
                     patch("automats.browser.UpperAirBrowser") as client:
                 client.return_value.prepare.side_effect = RunError("Unknown experiment")
-                with self.assertRaisesRegex(RunError, "Unknown experiment"):
+                self.assertEqual(
+                    run_plan(plan, root / "figures", log=lambda message: None, failures=failures),
+                    0,
+                )
+                client.return_value.plot.assert_not_called()
+                client.return_value.reset.assert_called_once()
+            self.assertEqual(failures, [(self.job, "Unknown experiment")])
+            self.assertEqual(clock.now, 1)
+            self.assertEqual(pacer.next_start, 1)
+            self.assertEqual(state_path.read_bytes(), original)
+
+            with patch("automats.runner.Path.home", return_value=root), \
+                    patch("automats.runner.QueryPacer", return_value=pacer), \
+                    patch("playwright.sync_api.sync_playwright"), \
+                    patch("automats.browser.UpperAirBrowser") as client:
+                client.return_value.prepare.side_effect = FatalRunError("MATS denied page access")
+                with self.assertRaisesRegex(FatalRunError, "MATS denied page access"):
                     run_plan(plan, root / "figures", log=lambda message: None)
                 client.return_value.plot.assert_not_called()
             self.assertEqual(clock.now, 1)
@@ -491,12 +508,71 @@ class ResultTests(unittest.TestCase):
                     patch("playwright.sync_api.sync_playwright"), \
                     patch("automats.browser.UpperAirBrowser") as client:
                 client.return_value.plot.side_effect = RunError("Query completion is unknown")
-                with self.assertRaisesRegex(RunError, "Query completion is unknown"):
+                with self.assertRaisesRegex(FatalRunError, "Query completion is unknown"):
                     run_plan(plan, root / "figures", log=lambda message: None)
                 client.return_value.plot.assert_called_once()
             self.assertEqual(pacer.next_start, 180)
             self.assertEqual(json.loads(state_path.read_text())["next_request_at"], 10180)
             self.assertIn("submitted query", json.loads(state_path.read_text())["reason"])
+
+    def test_per_plot_failures_skip_and_continue_to_remaining_plots(self):
+        plan = replace(self.plan, jobs=self.plan.jobs[:3],
+                       settings=replace(self.plan.settings, inter_plot_waiting_seconds=10))
+        clock = FakeClock()
+        pacer = QueryPacer(plan.settings, clock.clock, clock.wait)
+        failures = []
+        logs = []
+
+        def prepare(job):
+            if job == plan.jobs[0]:
+                raise RunError("Variable not supported for model")
+
+        def plot(job):
+            if job == plan.jobs[1]:
+                raise RunError("No data for requested curves")
+            return png_image(), {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "figures"
+            with patch("automats.runner.Path.home", return_value=root), \
+                    patch("automats.runner.QueryPacer", return_value=pacer), \
+                    patch("playwright.sync_api.sync_playwright"), \
+                    patch("automats.browser.UpperAirBrowser") as client:
+                client.return_value.prepare.side_effect = prepare
+                client.return_value.plot.side_effect = plot
+                saved = run_plan(plan, output, log=logs.append, failures=failures)
+            self.assertEqual(saved, 1)
+            self.assertEqual(failures, [
+                (plan.jobs[0], "Variable not supported for model"),
+                (plan.jobs[1], "No data for requested curves"),
+            ])
+            self.assertEqual(client.return_value.reset.call_count, 2)
+            self.assertFalse((output / plan.jobs[0].relative_path).exists())
+            self.assertFalse((output / plan.jobs[1].relative_path).exists())
+            self.assertTrue(figure_exists(output, plan.jobs[2].relative_path))
+            self.assertEqual(clock.waits, [10])
+            self.assertTrue(any("Completed with 2 skipped failed figure(s)" in line for line in logs))
+
+    def test_fatal_run_error_stops_immediately_without_continuing(self):
+        plan = replace(self.plan, jobs=self.plan.jobs[:3])
+        clock = FakeClock()
+        pacer = QueryPacer(plan.settings, clock.clock, clock.wait)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "figures"
+            with patch("automats.runner.Path.home", return_value=root), \
+                    patch("automats.runner.QueryPacer", return_value=pacer), \
+                    patch("playwright.sync_api.sync_playwright"), \
+                    patch("automats.browser.UpperAirBrowser") as client:
+                client.return_value.prepare.side_effect = [None, FatalRunError("MATS returned HTTP 503"), None]
+                client.return_value.plot.return_value = (png_image(), {})
+                with self.assertRaisesRegex(FatalRunError, "HTTP 503"):
+                    run_plan(plan, output, log=lambda message: None)
+                self.assertEqual(client.return_value.prepare.call_count, 2)
+                self.assertEqual(client.return_value.plot.call_count, 1)
+            self.assertTrue(figure_exists(output, plan.jobs[0].relative_path))
+            self.assertFalse((output / plan.jobs[2].relative_path).exists())
 
     def test_save_failure_after_completed_query_does_not_add_cooldown(self):
         plan = replace(self.plan, jobs=(self.job,))
@@ -576,15 +652,26 @@ class ResultTests(unittest.TestCase):
             self.assertLess(len(str(error.exception)), 1000)
 
     def test_runtime_error_identifies_plot_and_pre_query_stage(self):
+        logs = []
+        plan = replace(self.plan, jobs=(self.job,))
         with tempfile.TemporaryDirectory() as directory, patch("playwright.sync_api.sync_playwright"):
             with patch("automats.runner.Path.home", return_value=Path(directory)), \
                     patch("automats.browser.UpperAirBrowser") as client:
                 client.return_value.prepare.side_effect = RunError("Experiment/model 'UNKNOWN' is unavailable")
-                with self.assertRaises(RunError) as error:
-                    run_plan(self.plan, Path(directory) / "figures")
+                self.assertEqual(run_plan(plan, Path(directory) / "figures", log=logs.append), 0)
+                skip_log = "\n".join(logs)
+                self.assertIn("Skip failed: Plot 'ua_profile' (upperair / profile)", skip_log)
+                self.assertIn("Experiment/model 'UNKNOWN'", skip_log)
+                client.return_value.plot.assert_not_called()
+
+            with patch("automats.runner.Path.home", return_value=Path(directory)), \
+                    patch("automats.browser.UpperAirBrowser") as client:
+                client.return_value.prepare.side_effect = FatalRunError("MATS returned HTTP 503")
+                with self.assertRaises(FatalRunError) as error:
+                    run_plan(plan, Path(directory) / "figures", log=lambda message: None)
                 message = str(error.exception)
                 self.assertIn("Plot 'ua_profile' (upperair / profile)", message)
-                self.assertIn("Experiment/model 'UNKNOWN'", message)
+                self.assertIn("HTTP 503", message)
                 self.assertIn("before submitting this figure's plot query", message)
                 client.return_value.plot.assert_not_called()
 
@@ -628,6 +715,7 @@ class ResultTests(unittest.TestCase):
 
     def test_failed_regeneration_preserves_the_previous_figure(self):
         plan = replace(self.plan, jobs=(self.job,))
+        failures = []
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "figures"
             old_image = png_image((1, 1, 1))
@@ -637,8 +725,8 @@ class ResultTests(unittest.TestCase):
                     patch("automats.browser.UpperAirBrowser") as client:
                 client.return_value.effective_settings = {}
                 client.return_value.plot.side_effect = RunError("MATS query failed")
-                with self.assertRaisesRegex(RunError, "MATS query failed"):
-                    run_plan(plan, output, update=True, log=lambda message: None)
+                self.assertEqual(run_plan(plan, output, update=True, log=lambda message: None, failures=failures), 0)
+            self.assertEqual(failures, [(self.job, "MATS query failed")])
             self.assertEqual((output / self.job.relative_path).read_bytes(), old_image)
 
     def test_curve_validation_rejects_wrong_dates_leads_and_models(self):
@@ -1637,6 +1725,59 @@ class GenericBrowserTests(unittest.TestCase):
         self.assertTrue(image.startswith(PNG_SIGNATURE))
         self.assertEqual(metadata["figure"]["legend_names"], ["MODEL_A"])
 
+    def test_browser_recovers_cleanly_after_failed_prepare_or_no_data_plot(self):
+        client = UpperAirBrowser(self.context, "https://gsl.noaa.gov/mats", minimize=False)
+        valid_job = self.job(statistic="rmse")
+        client.prepare(valid_job)
+        image1, _ = client.plot(valid_job)
+        self.assertTrue(is_png(image1))
+        self.assertEqual(client.loaded_application, "surface")
+        self.assertTrue(client.plotted)
+
+        # Fail during prepare after a prior plot (simulating stale Session error / bad variable)
+        client.page.evaluate("() => Session.set('errorMessage', 'stale session failure')")
+        with self.assertRaises(RunError):
+            client.prepare(self.job(variable="unknown_var"))
+        self.assertIsNone(client.loaded_application)
+        self.assertFalse(client.plotted)
+
+        # Next valid job reloads cleanly and plots without inheriting prior errorMessage
+        client.prepare(valid_job)
+        self.assertEqual(client.loaded_application, "surface")
+        self.assertEqual(client.page.evaluate("() => Session.get('errorMessage')"), "")
+
+        # Simulate a no-data Plotly export failure during plot()
+        client.page.evaluate("""() => {
+            const orig = document.getElementById('plotMatched').onclick;
+            document.getElementById('plotMatched').onclick = () => {
+                orig();
+                const graph = document.getElementById('placeholder');
+                graph.data = graph.data.map(trace => ({...trace, x: [], y: []}));
+            };
+        }""")
+        with self.assertRaisesRegex(RunError, "No data for"):
+            client.plot(valid_job)
+        self.assertIsNone(client.loaded_application)
+        self.assertFalse(client.plotted)
+
+        # Following plot succeeds cleanly after reload
+        client.prepare(valid_job)
+        image2, _ = client.plot(valid_job)
+        self.assertTrue(is_png(image2))
+
+    def test_fatal_http_503_halts_even_for_combined_plot(self):
+        client = UpperAirBrowser(self.context, "https://gsl.noaa.gov/mats", minimize=False)
+        job = self.job()
+        def fail_with_503(name, value, choice=True):
+            client.network_error = FatalRunError("MATS returned HTTP 503; stopping rather than repeating unknown server work")
+            raise client.network_error
+
+        client.prepare(job)
+        with patch.object(client, "_set", side_effect=fail_with_503):
+            with self.assertRaisesRegex(FatalRunError, "HTTP 503"):
+                client.prepare(job)
+        self.assertIsNone(client.loaded_application)
+
 
 class ChromeWindowTests(unittest.TestCase):
     def test_minimize_targets_only_the_pages_own_window(self):
@@ -1826,26 +1967,47 @@ class SlideTests(unittest.TestCase):
             self.assertEqual([shape.text for shape in deck.slides[2].shapes
                               if shape.name.startswith("Caption ")], ["T", "RHobT"])
 
-    def test_missing_corrupt_or_non_png_figures_preserve_previous_deck(self):
+    def test_missing_corrupt_or_non_png_figures_use_placeholders(self):
+        from io import BytesIO
         from PIL import Image
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
 
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
             self.save_figures(output)
-            deck = build_slides(self.plan, output)
-            previous = deck.read_bytes()
             figure = output / self.plan.jobs[0].relative_path
-            figure.unlink()
-            with self.assertRaisesRegex(SlideError, "Slide 1.*row 1.*ua_dieoff_T"):
-                build_slides(self.plan, output)
-            figure.write_bytes(b"not a PNG")
-            with self.assertRaises(SlideError):
-                build_slides(self.plan, output)
-            Image.new("RGB", (10, 10)).save(figure, format="JPEG")
-            with self.assertRaisesRegex(SlideError, "expected a PNG"):
-                build_slides(self.plan, output)
-            self.assertEqual(deck.read_bytes(), previous)
-            self.assertEqual(list(output.glob(".slides-*")), [])
+            valid_second = (output / self.plan.jobs[1].relative_path).read_bytes()
+            valid_third = (output / self.plan.jobs[2].relative_path).read_bytes()
+
+            scenarios = [
+                ("missing", lambda: figure.unlink(), "Slide 1.*row 1.*ua_dieoff_T"),
+                ("corrupt", lambda: figure.write_bytes(b"not a PNG"), "using placeholder"),
+                ("jpeg", lambda: Image.new("RGB", (10, 10)).save(figure, format="JPEG"), "expected a PNG"),
+            ]
+            for name, mutate, pattern in scenarios:
+                with self.subTest(scenario=name):
+                    mutate()
+                    logs = []
+                    missing = []
+                    deck_path = build_slides(self.plan, output, log=logs.append, missing=missing)
+                    self.assertTrue(deck_path.is_file())
+                    self.assertEqual(len(missing), 1)
+                    self.assertEqual(missing[0][0], self.plan.jobs[0].relative_path)
+                    self.assertRegex("\n".join(logs), pattern)
+                    deck = Presentation(deck_path)
+                    slide = deck.slides[1]
+                    pictures = [shape for shape in slide.shapes if shape.shape_type == MSO_SHAPE_TYPE.PICTURE]
+                    self.assertEqual([shape.name for shape in pictures],
+                                     [path for row in self.plan.slides[0].rows for path in row])
+                    with Image.open(BytesIO(pictures[0].image.blob)) as placeholder:
+                        self.assertEqual(placeholder.format, "PNG")
+                        self.assertEqual(placeholder.size, (self.plan.jobs[0].width, self.plan.jobs[0].height))
+                    self.assertEqual(pictures[1].image.blob, valid_second)
+                    self.assertEqual(pictures[2].image.blob, valid_third)
+                    captions = [shape.text for shape in slide.shapes if shape.name.startswith("Caption ")]
+                    self.assertEqual(captions, ["T", "RHobT", "Wind"])
+                    self.assertEqual(list(output.glob(".slides-*")), [])
 
     def test_deck_is_replaced_only_after_a_successful_save(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1871,8 +2033,45 @@ class SlideTests(unittest.TestCase):
                 patch("automats.cli.run_plan") as execute, redirect_stdout(messages):
                 self.assertEqual(main(["recipe.yaml", "--slides-only", "--output-dir", str(output)]), 0)
             execute.assert_not_called()
-            self.assertIn("Saved 1 slides to", messages.getvalue())
+            self.assertIn("Saved slides to", messages.getvalue())
             self.assertTrue((output / "slides.pptx").is_file())
+
+    def test_cli_builds_slides_with_warnings_when_some_mats_plots_fail(self):
+        from PIL import Image
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+
+            def fake_run(plan, out_dir, *args, failures=None, **kwargs):
+                for idx, job in enumerate(plan.jobs):
+                    if idx == 0:
+                        if failures is not None:
+                            failures.append((job, "MATS: No data for requested curves"))
+                        continue
+                    target = out_dir / job.relative_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    Image.new("RGB", (1600, 960), "blue").save(target, format="PNG")
+                return 2
+
+            out_buf = StringIO()
+            err_buf = StringIO()
+            with patch("automats.cli.load_plan", return_value=self.plan), \
+                    patch("automats.cli.run_plan", side_effect=fake_run), \
+                    redirect_stdout(out_buf), redirect_stderr(err_buf):
+                code = main(["recipe.yaml", "--output-dir", str(output)])
+
+            self.assertEqual(code, 0)
+            self.assertIn("Saved 2 MATS figures under", out_buf.getvalue())
+            self.assertIn("Saved slides to", out_buf.getvalue())
+            self.assertIn("Skipped 1 failed MATS plot(s):", err_buf.getvalue())
+            self.assertIn(self.plan.jobs[0].relative_path, err_buf.getvalue())
+            self.assertIn("Used placeholders for 1 missing/unreadable MATS figure(s).", err_buf.getvalue())
+            deck = Presentation(output / "slides.pptx")
+            self.assertEqual(len(deck.slides), 2)
+            pictures = [shape for shape in deck.slides[1].shapes if shape.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            self.assertEqual(len(pictures), 3)
 
     def test_cli_builds_automatically_but_not_after_failed_or_partial_runs(self):
         for options, failed, expected in (([], False, True), (["--limit", "1"], False, False),
@@ -1921,7 +2120,7 @@ class SlideTests(unittest.TestCase):
             self.assertEqual(main(["recipe.yaml", "--plan"]), 0)
             execute.assert_not_called()
         self.assertIn("Slide generation failed: slide 1: ambiguous figure", messages.getvalue())
-        self.assertIn("Saved 3 figures", messages.getvalue())
+        self.assertIn("Saved 3 MATS figures", messages.getvalue())
         self.assertIn("Slide generation disabled", messages.getvalue())
 
     def test_slide_save_errors_do_not_fail_a_successful_plot_run(self):
@@ -1933,7 +2132,35 @@ class SlideTests(unittest.TestCase):
                 redirect_stdout(messages), redirect_stderr(messages):
                 self.assertEqual(main(["recipe.yaml"]), 0)
             self.assertIn("Slide generation failed", messages.getvalue())
-            self.assertIn("Saved 3 figures", messages.getvalue())
+            self.assertIn("Saved 3 MATS figures", messages.getvalue())
+
+    def test_cli_reports_mats_figures_and_graphics_counts_separately(self):
+        from automats.config import PygrafGraphicsConfig
+
+        pygraf_plan = replace(
+            self.plan,
+            pygraf_graphics=PygrafGraphicsConfig(enable=True, recipe="graphics.yaml"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+
+            def fake_build_slides(plan, out_dir, *, log=None, missing=None, graphics_stats=None):
+                if graphics_stats is not None:
+                    graphics_stats["saved"] = 2
+                return out_dir / "slides.pptx"
+
+            out_buf = StringIO()
+            with patch("automats.cli.load_plan", return_value=pygraf_plan), \
+                    patch("automats.cli.run_plan", return_value=0), \
+                    patch("automats.cli.build_slides", side_effect=fake_build_slides), \
+                    redirect_stdout(out_buf):
+                code = main(["recipe.yaml", "--output-dir", str(output)])
+
+            self.assertEqual(code, 0)
+            text = out_buf.getvalue()
+            self.assertIn(f"Saved 0 MATS figures under {output.resolve()}", text)
+            self.assertIn(f"Saved 2 graphics under {(output / 'graphics').resolve()}", text)
+            self.assertIn(f"Saved slides to {(output / 'slides.pptx').resolve()}", text)
 
 
 class CliTests(unittest.TestCase):

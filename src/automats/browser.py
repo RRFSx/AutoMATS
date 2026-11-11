@@ -13,7 +13,7 @@ import time
 from urllib.parse import urljoin, urlsplit
 
 from automats.config import PlotJob, STATISTICS, VARIABLES, VARIABLE_ALIASES
-from automats.runner import ResolutionError, RunError, is_png, resolve_option, validate_effective_curves
+from automats.runner import FatalRunError, ResolutionError, RunError, is_png, resolve_option, validate_effective_curves
 
 
 def discover_applications(links: list[dict], base_url: str) -> list[dict]:
@@ -324,7 +324,7 @@ def annotate_image(page, job: PlotJob, image: bytes, previous_figure: dict | Non
     return image, metadata
 
 
-class Throttled(RunError):
+class Throttled(FatalRunError):
     def __init__(self, message: str, retry_after: float = 0):
         super().__init__(message)
         self.retry_after = retry_after
@@ -495,6 +495,20 @@ class UpperAirBrowser:
         self.loaded_application = None
         self.plotted = False
 
+    def reset(self) -> None:
+        """Reset cached page state so the next plot reloads cleanly."""
+        self.loaded_application = None
+        self.plotted = False
+        self.network_error = None
+        self.expected = {}
+        self.curves = []
+        self.added_curve_specs = []
+        if self.page is not None and not self.page.is_closed():
+            try:
+                self.page.evaluate("() => { if (typeof Session !== 'undefined') Session.set('errorMessage', ''); }")
+            except Exception:
+                pass
+
     def _response(self, response) -> None:
         if not response.url.startswith("https://gsl.noaa.gov/"):
             return
@@ -511,7 +525,7 @@ class UpperAirBrowser:
                     diagnostics.append(f"{name}={value}")
             details = f" ({'; '.join(diagnostics)})" if diagnostics else ""
             subject = "metadata connection" if metadata_request else "page access"
-            self.network_error = RunError(
+            self.network_error = FatalRunError(
                 f"MATS denied {subject}: HTTP {response.status} at {url}{details}. "
                 "The page can load while metadata remains unavailable. "
                 "Stopping without access-denial retries; check authorized access with MATS administrators."
@@ -520,7 +534,7 @@ class UpperAirBrowser:
             self.network_error = Throttled("MATS returned HTTP 429", retry_after_seconds(
                 response.headers.get("retry-after", "0")))
         elif response.status in {502, 503, 504}:
-            self.network_error = RunError(f"MATS returned HTTP {response.status}; stopping rather than repeating unknown server work")
+            self.network_error = FatalRunError(f"MATS returned HTTP {response.status}; stopping rather than repeating unknown server work")
 
     def _error(self) -> None:
         if self.network_error:
@@ -530,13 +544,18 @@ class UpperAirBrowser:
             raise RunError(f"MATS: {error}")
 
     def _open_page(self, url: str) -> None:
-        response = self.page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        from playwright.sync_api import TimeoutError as BrowserTimeout
+
+        try:
+            response = self.page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        except BrowserTimeout as error:
+            raise FatalRunError(f"Timed out loading MATS page {url}") from error
         if self.network_error:
             raise self.network_error
         if response and response.status >= 400:
-            raise RunError(f"MATS access failed: HTTP {response.status} at {url}; page title: {self.page.title()!r}")
+            raise FatalRunError(f"MATS access failed: HTTP {response.status} at {url}; page title: {self.page.title()!r}")
         if "Just a moment" in self.page.title():
-            raise RunError("MATS access challenge: stop and use an authorized browser session")
+            raise FatalRunError("MATS access challenge: stop and use an authorized browser session")
 
     def _parameters(self) -> list[dict]:
         return self.page.evaluate(PARAMETERS)
@@ -558,7 +577,7 @@ class UpperAirBrowser:
             if ready and now - stable_since >= self.control_waiting_seconds:
                 return
             if now - started >= 30:
-                raise RunError("MATS controls did not settle within 30 seconds; stopping before the next control action")
+                raise FatalRunError("MATS controls did not settle within 30 seconds; stopping before the next control action")
             self.page.wait_for_timeout(min(100, self.control_waiting_seconds * 1000))
 
     def _snapshot(self) -> dict:
@@ -648,6 +667,14 @@ class UpperAirBrowser:
         return actual
 
     def prepare(self, job: PlotJob) -> None:
+        try:
+            self._prepare_impl(job)
+        except Exception:
+            self.loaded_application = None
+            self.plotted = False
+            raise
+
+    def _prepare_impl(self, job: PlotJob) -> None:
         from playwright.sync_api import TimeoutError as BrowserTimeout
 
         self.network_error = None
@@ -665,7 +692,7 @@ class UpperAirBrowser:
             }))""")
             self.applications = discover_applications(links, self.base_url)
             if not self.applications:
-                raise RunError(f"No application links were found on the MATS homepage: {self.base_url}")
+                raise FatalRunError(f"No application links were found on the MATS homepage: {self.base_url}")
         selected = resolve_application(job.application, self.applications)
         self.application = selected["slug"]
         self.url = selected["url"]
@@ -706,9 +733,9 @@ class UpperAirBrowser:
                             addButton: !!document.querySelector('#add'),
                             plotSelector: !!document.querySelector('#plotTypes-selector'), modelCount};
                     }""")
-                    raise RunError(f"Application {selected['title']!r} did not expose the required MATS curve controls "
-                                   "within 90 seconds; it may require a different workflow or have a connection failure. "
-                                   f"Readiness: {json.dumps(state, sort_keys=True)}. No plot query was submitted.") from error
+                    raise FatalRunError(f"Application {selected['title']!r} did not expose the required MATS curve controls "
+                                        "within 90 seconds; it may require a different workflow or have a connection failure. "
+                                        f"Readiness: {json.dumps(state, sort_keys=True)}. No plot query was submitted.") from error
         if self.network_error:
             raise self.network_error
         self.loaded_application = self.application
@@ -814,7 +841,7 @@ class UpperAirBrowser:
                     raise RunError(f"MATS failed to add curve {curve.label}: {mats_err}")
                 self.added_curve_specs.append(curve)
             except (RunError, ResolutionError) as error:
-                if isinstance(error, Throttled) or self.network_error:
+                if isinstance(error, FatalRunError) or self.network_error:
                     raise
                 if not is_combined:
                     raise
@@ -844,38 +871,53 @@ class UpperAirBrowser:
                        "date_range": {"start": date_job.start, "end": date_job.end}}
 
     def plot(self, job: PlotJob) -> tuple[bytes, dict]:
-        from playwright.sync_api import TimeoutError as BrowserTimeout
+        from playwright.sync_api import Error as BrowserError, TimeoutError as BrowserTimeout
 
-        self.page.evaluate("() => Session.set('plotResultKey', null)")
-        selector = "#plotMatched" if self.matched_samples else "#plotUnmatched"
-        self.page.locator(selector).click()
         try:
-            status = self.page.wait_for_function(PLOT_STATUS, timeout=300000, polling=250).json_value()
-        except BrowserTimeout as error:
-            raise RunError("Query completion is unknown after five minutes; stopping to avoid overlapping server work") from error
-        self._error()
-        if status.get("error"):
-            raise RunError(f"MATS: {status['error']}")
-        exported = self.page.evaluate(EXPORT_IMAGE, {
-            "curves": [asdict(curve) for curve in (getattr(self, "added_curve_specs", None) or job.curves)],
-            "width": job.width, "height": job.height,
-            "timeSeries": self.effective_settings["plot_type"] == "TimeSeries",
-            "lineWeight": job.line_weight,
-            "markerWeight": job.marker_weight,
-            "allowPartial": len(job.curves) > 1,
-        })
-        prefix = "data:image/png;base64,"
-        if not exported["image"].startswith(prefix):
-            raise RunError("Unexpected Plotly image format")
-        metadata = exported["metadata"]
-        metadata["accepted_curves"] = self.curves
-        metadata["effective_settings"] = self.effective_settings
-        image = base64.b64decode(exported["image"][len(prefix):], validate=True)
-        image, metadata["figure"] = annotate_image(
-            self.page, job, image,
-            effective_settings=self.effective_settings,
-            plotted_curves=metadata["curves"],
-            plot_params=metadata.get("plot_params"),
-        )
-        self.plotted = True
-        return image, metadata
+            self.page.evaluate("() => Session.set('plotResultKey', null)")
+            selector = "#plotMatched" if self.matched_samples else "#plotUnmatched"
+            self.page.locator(selector).click()
+            try:
+                status = self.page.wait_for_function(PLOT_STATUS, timeout=300000, polling=250).json_value()
+            except BrowserTimeout as error:
+                raise FatalRunError("Query completion is unknown after five minutes; stopping to avoid overlapping server work") from error
+            self._error()
+            if status.get("error"):
+                raise RunError(f"MATS: {status['error']}")
+            try:
+                exported = self.page.evaluate(EXPORT_IMAGE, {
+                    "curves": [asdict(curve) for curve in (getattr(self, "added_curve_specs", None) or job.curves)],
+                    "width": job.width, "height": job.height,
+                    "timeSeries": self.effective_settings["plot_type"] == "TimeSeries",
+                    "lineWeight": job.line_weight,
+                    "markerWeight": job.marker_weight,
+                    "allowPartial": len(job.curves) > 1,
+                })
+            except BrowserError as error:
+                self._error()
+                first_line = str(error).splitlines()[0]
+                for err_prefix in ("Page.evaluate: ", "Error: "):
+                    first_line = first_line.removeprefix(err_prefix)
+                first_line = first_line.strip()
+                if "No data for" in first_line or "Missing or ambiguous curve" in first_line:
+                    raise RunError(first_line) from error
+                raise
+            prefix = "data:image/png;base64,"
+            if not exported["image"].startswith(prefix):
+                raise RunError("Unexpected Plotly image format")
+            metadata = exported["metadata"]
+            metadata["accepted_curves"] = self.curves
+            metadata["effective_settings"] = self.effective_settings
+            image = base64.b64decode(exported["image"][len(prefix):], validate=True)
+            image, metadata["figure"] = annotate_image(
+                self.page, job, image,
+                effective_settings=self.effective_settings,
+                plotted_curves=metadata["curves"],
+                plot_params=metadata.get("plot_params"),
+            )
+            self.plotted = True
+            return image, metadata
+        except Exception:
+            self.loaded_application = None
+            self.plotted = False
+            raise

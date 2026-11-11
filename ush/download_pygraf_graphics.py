@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-download_pgraf_graphics.py: Standalone CLI utility to download pygraf graphics from HPC.
+download_pygraf_graphics.py: Standalone CLI utility to download pygraf graphics from HPC.
 
 Usage:
-    ush/download_pgraf_graphics.py <recipe.yaml> [options]
+    ush/download_pygraf_graphics.py <recipe.yaml> [options]
 
 Options:
     -o, --output-dir DIR   Local destination directory (default: ./graphics)
-    -w, --workers N        Max parallel SCP downloads (default: 4)
     --update               Re-download existing files instead of using local cache
     --dry-run              List all targeted remote files without downloading
     --debug                Print verbose transfer details, including missing or uncopied files
@@ -22,6 +21,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -33,69 +33,114 @@ from typing import Any, Dict, List, Optional, Tuple
 ROOT = Path(__file__).resolve().parent.parent
 venv_dir = ROOT / ".venv"
 venv_python = venv_dir / "bin" / "python"
-if venv_python.is_file() and Path(sys.prefix).resolve() != venv_dir.resolve():
+if __name__ == "__main__" and venv_python.is_file() and Path(sys.prefix).resolve() != venv_dir.resolve():
     try:
         os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve())] + sys.argv[1:])
     except (PermissionError, OSError):
         pass
 
 
-def find_hpc_config() -> Optional[Path]:
-    """Finds .hpc_config in CWD or AutoMATS root directory."""
+def _resolve_ssh_helper_path() -> Path:
+    """Returns path to ush/ssh_helper.py."""
+    return Path(__file__).resolve().parent / "ssh_helper.py"
+
+
+def find_hpc_config_file() -> Optional[Path]:
+    """Finds .hpc_config path in CWD or AutoMATS repository root."""
     cwd_dot = Path.cwd() / ".hpc_config"
-    if cwd_dot.exists():
+    if cwd_dot.is_file():
         return cwd_dot
     root_dot = ROOT / ".hpc_config"
-    if root_dot.exists():
+    if root_dot.is_file():
         return root_dot
     return None
 
 
-def load_hpc_config() -> Dict[str, Dict[str, Any]]:
-    """Loads .hpc_config dictionary."""
-    path = find_hpc_config()
-    if not path or not path.exists():
+def _clean_hpc_username(value: Any) -> Optional[str]:
+    """Normalizes a configured username string, returning None if unset or placeholder."""
+    if value is None:
+        return None
+    val = str(value).strip().strip("'\"")
+    if not val or val.lower() in ("null", "none", "~", "<your_username>"):
+        return None
+    return val
+
+
+def load_hpc_users(config_path: Optional[Path] = None) -> Dict[str, str]:
+    """
+    Loads simple `<cluster>: <username>` mappings from `.hpc_config`.
+    Also tolerates legacy nested `<cluster>:\\n  username: <username>` blocks.
+    """
+    path = config_path or find_hpc_config_file()
+    if not path or not path.is_file():
         return {}
-    cfg: Dict[str, Dict[str, Any]] = {}
-    current = None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.endswith(":") and ":" not in line[:-1]:
-            current = line[:-1].strip().lower()
-            cfg[current] = {}
-        elif current and ":" in line:
-            k, v = line.split(":", 1)
-            k = k.strip()
-            v = v.strip()
-            if v.lower() in ("null", "none", "~", ""):
-                cfg[current][k] = None
-            elif v.isdigit():
-                cfg[current][k] = int(v)
-            else:
-                cfg[current][k] = v
-    return cfg
-
-
-def test_local_access(username: str, local_port: int, timeout: float = 2.5) -> bool:
-    """Verifies that SSH access through localhost:<local_port> is currently active."""
-    cmd = [
-        "ssh",
-        "-o", "BatchMode=yes",
-        "-o", f"ConnectTimeout={int(timeout)}",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "LogLevel=ERROR",
-        "-p", str(local_port),
-        f"{username}@localhost",
-        "true",
-    ]
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return proc.returncode == 0
-    except Exception:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+
+    users: Dict[str, str] = {}
+    current_section: Optional[str] = None
+    for raw in text.splitlines():
+        no_comment = re.sub(r"(?:^|\s)#.*$", "", raw).rstrip()
+        stripped = no_comment.strip()
+        if not stripped or ":" not in stripped:
+            continue
+
+        indent = len(no_comment) - len(no_comment.lstrip(" \t"))
+        k, v = stripped.split(":", 1)
+        key = k.strip().strip("'\"").lower()
+        if not key:
+            continue
+
+        if indent == 0:
+            user = _clean_hpc_username(v)
+            if v.strip():
+                current_section = None
+                if user:
+                    users[key] = user
+            else:
+                current_section = key
+        elif current_section and key in ("username", "user"):
+            user = _clean_hpc_username(v)
+            if user:
+                users[current_section] = user
+
+    return users
+
+
+def _is_unix_socket_alive(socket_path: str) -> bool:
+    """Checks whether a UNIX domain socket is active and accepting connections."""
+    if not socket_path or not os.path.exists(socket_path):
         return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            s.connect(socket_path)
+            return True
+    except OSError:
+        return False
+
+
+def test_hpc_session_ready(cluster: str, username: str = "") -> bool:
+    """Verifies that the persistent background HPC terminal session is active for `cluster`."""
+    import glob
+
+    hpc_key = cluster.strip().lower()
+    if not hpc_key:
+        return False
+    if hpc_key == "localhost":
+        return True
+
+    candidates: List[str] = []
+    if username and username != "<your_username>":
+        candidates.append(f"/tmp/hpc_term_{username}_{hpc_key}.sock")
+    candidates.extend(sorted(glob.glob(f"/tmp/hpc_term_*_{hpc_key}.sock")))
+
+    for sock_path in candidates:
+        if _is_unix_socket_alive(sock_path):
+            return True
+    return False
 
 
 def _parse_yaml_scalar(v: str) -> Any:
@@ -108,6 +153,14 @@ def _parse_yaml_scalar(v: str) -> Any:
     if v.isdigit():
         return int(v)
     return v
+
+
+def _split_yaml_kv(text: str) -> Optional[Tuple[str, str]]:
+    """Splits a YAML `key: value` or `key:` pair without splitting on `cluster:/path` or URLs."""
+    m = re.match(r"^([^:\[\]]+?):(?:\s+(.*)|\s*)$", text)
+    if not m:
+        return None
+    return m.group(1).strip().strip("'\""), (m.group(2) or "").strip()
 
 
 def parse_simple_yaml(text: str) -> Dict[str, Any]:
@@ -138,10 +191,9 @@ def parse_simple_yaml(text: str) -> Dict[str, Any]:
                 if cur_line.startswith("- "):
                     content = cur_line[2:].strip()
                     idx += 1
-                    if ":" in content and not content.endswith("]"):
-                        k, v = content.split(":", 1)
-                        k = k.strip().strip("'\"")
-                        v = v.strip()
+                    kv = _split_yaml_kv(content)
+                    if kv is not None:
+                        k, v = kv
                         item_dict: Dict[str, Any] = {}
                         if v:
                             item_dict[k] = _parse_yaml_scalar(v)
@@ -154,10 +206,9 @@ def parse_simple_yaml(text: str) -> Dict[str, Any]:
                             ni, nl = raw_lines[idx]
                             if ni <= cur_indent or nl.startswith("- "):
                                 break
-                            if ":" in nl:
-                                nk, nv = nl.split(":", 1)
-                                nk = nk.strip().strip("'\"")
-                                nv = nv.strip()
+                            nkv = _split_yaml_kv(nl)
+                            if nkv is not None:
+                                nk, nv = nkv
                                 idx += 1
                                 if nv:
                                     item_dict[nk] = _parse_yaml_scalar(nv)
@@ -191,10 +242,9 @@ def parse_simple_yaml(text: str) -> Dict[str, Any]:
                     break
                 if cur_line.startswith("- "):
                     break
-                if ":" in cur_line:
-                    k, v = cur_line.split(":", 1)
-                    k = k.strip().strip("'\"")
-                    v = v.strip()
+                kv = _split_yaml_kv(cur_line)
+                if kv is not None:
+                    k, v = kv
                     idx += 1
                     if v:
                         res_dict[k] = _parse_yaml_scalar(v)
@@ -265,31 +315,28 @@ def detect_prefix_from_path(comroot: str) -> str:
     return ""
 
 
-def detect_prefix(remote_comroot: str, username: str = "", port: int = 0) -> str:
+def detect_prefix(remote_comroot: str, username: str = "", cluster: str = "") -> str:
     """
     Detects model prefix under COMROOT.
     1. First tries extracting from the path directly: .../com/<prefix>/... -> <prefix>
-    2. If not found in path and port is available, queries remote COMROOT for <prefix>.YYYYMMDD directories.
+    2. If not found in path and cluster session is active, queries remote COMROOT for <prefix>.YYYYMMDD directories.
     3. Falls back to 'rrfs' as default.
     """
     p = detect_prefix_from_path(remote_comroot)
     if p:
         return p
 
-    if username and port:
+    if cluster and test_hpc_session_ready(cluster, username):
         try:
-            cmd = [
-                "ssh",
-                "-p", str(port),
-                "-o", "BatchMode=yes",
-                "-o", "ConnectTimeout=3",
-                "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "StrictHostKeyChecking=no",
-                "-o", "LogLevel=ERROR",
-                f"{username}@localhost",
+            ssh_helper_path = _resolve_ssh_helper_path()
+            cmd = [sys.executable, str(ssh_helper_path), cluster.lower()]
+            if username:
+                cmd.extend(["-u", username])
+            cmd.extend([
+                "--cmd",
                 f"ls -d {remote_comroot.rstrip('/')}/*.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9] 2>/dev/null | head -n1",
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5.0)
+            ])
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10.0)
             if res.returncode == 0 and res.stdout.strip():
                 dir_name = Path(res.stdout.strip()).name
                 if "." in dir_name:
@@ -514,40 +561,49 @@ def cleanup_empty_directories(root_dir: Path) -> int:
 
 def stream_tar_pull(
     username: str,
-    port: int,
     tasks: List[Tuple[str, Path]],
     cluster: str = "HPC",
     debug: bool = False,
 ) -> Tuple[int, int, int]:
     """
     Downloads remote files using a single streaming tar session over SSH.
-    - Sends all remote file paths to remote `tar -P -cf - --null -T -` via stdin.
+    - Sends unique remote file paths to remote `tar -P -cf - --null -T -` via stdin.
     - Reads the incoming byte stream locally via `tarfile.open(mode='r|*')`.
-    - Directly writes each member file to its target destination folder.
+    - Directly writes each member file to all requested local destination paths.
     - Missing files are ignored by remote tar and recorded as missing locally.
     Returns (completed_count, missing_count, error_count).
     """
     if not tasks:
         return 0, 0, 0
 
-    path_map: Dict[str, Path] = {r.lstrip("/"): l for r, l in tasks}
-    norm_to_remote: Dict[str, str] = {r.lstrip("/"): r for r, _ in tasks}
-    received_remote_paths: set = set()
+    dest_map: Dict[str, List[Path]] = {}
+    unique_remote_paths: List[str] = []
+    seen_dest_keys: set = set()
+    task_counts: Dict[Tuple[str, str], int] = {}
+
+    for r, l in tasks:
+        norm = r.lstrip("/")
+        d_key = (norm, os.path.abspath(str(l)))
+        task_counts[d_key] = task_counts.get(d_key, 0) + 1
+        if norm not in dest_map:
+            dest_map[norm] = []
+            unique_remote_paths.append(r)
+        if d_key not in seen_dest_keys:
+            seen_dest_keys.add(d_key)
+            dest_map[norm].append(l)
+
+    received_keys: set = set()
+    error_keys: set = set()
     total_tasks = len(tasks)
 
-    # Pack paths separated by null byte \0 for tar --null -T -
-    path_data = ("\0".join(r for r, _ in tasks) + "\0").encode("utf-8")
+    # Pack unique remote paths separated by null byte \0 for tar --null -T -
+    path_data = ("\0".join(unique_remote_paths) + "\0").encode("utf-8")
 
-    cmd = [
-        "ssh",
-        "-p", str(port),
-        "-o", "BatchMode=yes",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "LogLevel=ERROR",
-        f"{username}@localhost",
-        "tar -P -cf - --null -T -",
-    ]
+    ssh_helper_path = _resolve_ssh_helper_path()
+    cmd = [sys.executable, str(ssh_helper_path), cluster.lower()]
+    if username:
+        cmd.extend(["-u", username])
+    cmd.extend(["--cmd", "tar -P -cf - --null -T -"])
 
     proc = subprocess.Popen(
         cmd,
@@ -594,29 +650,106 @@ def stream_tar_pull(
                     if not member.isfile():
                         continue
                     norm = member.name.lstrip("/")
-                    dest = path_map.get(norm)
-                    if not dest:
+                    dests = [
+                        d for d in dest_map.get(norm, [])
+                        if (norm, os.path.abspath(str(d))) not in received_keys
+                    ]
+                    if not dests:
                         continue
 
-                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    prev_done = completed + errors
+
                     try:
                         fin = tar_stream.extractfile(member)
-                        if fin:
-                            with dest.open("wb") as fout:
-                                shutil.copyfileobj(fin, fout, length=64 * 1024)
-                            if dest.exists() and dest.stat().st_size > 0:
-                                completed += 1
-                                orig_r = norm_to_remote.get(norm, norm)
-                                received_remote_paths.add(orig_r)
-                            elif dest.exists() and dest.stat().st_size == 0:
-                                dest.unlink(missing_ok=True)
                     except Exception as e:
-                        errors += 1
-                        if debug:
-                            print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+                        for dest in dests:
+                            d_key = (norm, os.path.abspath(str(dest)))
+                            if d_key not in error_keys and d_key not in received_keys:
+                                error_keys.add(d_key)
+                                errors += task_counts.get(d_key, 1)
+                            if debug:
+                                print(f"  [DEBUG] Error extracting {dest}: {e}", file=sys.stderr)
+                        fin = None
+
+                    if fin:
+                        primary_dest: Optional[Path] = None
+                        primary_idx = -1
+                        stream_err: Optional[Exception] = None
+
+                        for idx, dest in enumerate(dests):
+                            d_key = (norm, os.path.abspath(str(dest)))
+                            try:
+                                dest.parent.mkdir(parents=True, exist_ok=True)
+                                fout = dest.open("wb")
+                            except Exception as e:
+                                if d_key not in error_keys and d_key not in received_keys:
+                                    error_keys.add(d_key)
+                                    errors += task_counts.get(d_key, 1)
+                                if debug:
+                                    print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+                                continue
+
+                            try:
+                                with fout:
+                                    shutil.copyfileobj(fin, fout, length=64 * 1024)
+                            except Exception as e:
+                                stream_err = e
+                                primary_idx = idx
+                                if d_key not in error_keys and d_key not in received_keys:
+                                    error_keys.add(d_key)
+                                    errors += task_counts.get(d_key, 1)
+                                if debug:
+                                    print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+                                try:
+                                    dest.unlink(missing_ok=True)
+                                except OSError:
+                                    pass
+                                break
+
+                            primary_dest = dest
+                            primary_idx = idx
+                            break
+
+                        if stream_err is not None:
+                            for dest in dests[primary_idx + 1:]:
+                                d_key = (norm, os.path.abspath(str(dest)))
+                                if d_key not in error_keys and d_key not in received_keys:
+                                    error_keys.add(d_key)
+                                    errors += task_counts.get(d_key, 1)
+                                if debug:
+                                    print(
+                                        f"  [DEBUG] Error writing {dest}: aborted after stream failure ({stream_err})",
+                                        file=sys.stderr,
+                                    )
+                        elif primary_dest is not None:
+                            if primary_dest.exists() and primary_dest.stat().st_size > 0:
+                                p_key = (norm, os.path.abspath(str(primary_dest)))
+                                if p_key not in received_keys:
+                                    received_keys.add(p_key)
+                                    completed += task_counts.get(p_key, 1)
+
+                                for dest in dests[primary_idx + 1:]:
+                                    d_key = (norm, os.path.abspath(str(dest)))
+                                    try:
+                                        dest.parent.mkdir(parents=True, exist_ok=True)
+                                        shutil.copy2(primary_dest, dest)
+                                        if dest.exists() and dest.stat().st_size > 0:
+                                            if d_key not in received_keys:
+                                                received_keys.add(d_key)
+                                                completed += task_counts.get(d_key, 1)
+                                        elif dest.exists() and dest.stat().st_size == 0:
+                                            dest.unlink(missing_ok=True)
+                                    except Exception as e:
+                                        if d_key not in error_keys and d_key not in received_keys:
+                                            error_keys.add(d_key)
+                                            errors += task_counts.get(d_key, 1)
+                                        if debug:
+                                            print(f"  [DEBUG] Error writing {dest}: {e}", file=sys.stderr)
+                            elif primary_dest.exists() and primary_dest.stat().st_size == 0:
+                                primary_dest.unlink(missing_ok=True)
 
                     total_done = completed + errors
-                    if total_done % 10 == 0 or total_done == total_tasks:
+                    if total_done > prev_done and (total_done // 10 > prev_done // 10 or total_done == total_tasks):
                         pct = int(100 * total_done / total_tasks)
                         print(f"  Progress: {total_done}/{total_tasks} ({pct}%) [{completed} ok]", flush=True)
 
@@ -636,7 +769,11 @@ def stream_tar_pull(
             proc.kill()
             proc.wait()
 
-    missing_tasks = [(r, l) for r, l in tasks if r not in received_remote_paths]
+    missing_tasks = [
+        (r, l) for r, l in tasks
+        if (r.lstrip("/"), os.path.abspath(str(l))) not in received_keys
+        and (r.lstrip("/"), os.path.abspath(str(l))) not in error_keys
+    ]
     missing = len(missing_tasks)
 
     # In debug mode, list missing files
@@ -659,50 +796,45 @@ def stream_tar_pull(
     return completed, missing, errors
 
 
-def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str, str, int, str, str, List[Tuple[str, Path]]]:
+def normalize_comroots(raw_comroot: Any) -> List[str]:
     """
-    Builds the list of (remote_path, local_path) tuples from recipe configuration.
-    Supports top-level 'cycle' and 'fhr' defaults and per-graphic Style B overrides.
-    Returns (hpc_cluster, username, port, expname, prefix, tasks).
+    Normalizes COMROOT from a single string or a list of strings,
+    preserving order and removing duplicates/empty entries.
     """
-    comroot_raw = str(recipe.get("COMROOT", "")).strip()
-    if not comroot_raw:
-        raise ValueError("Missing 'COMROOT' in recipe.")
+    if raw_comroot is None:
+        return []
 
-    if ":" in comroot_raw:
-        hpc_cluster, remote_comroot = comroot_raw.split(":", 1)
-        hpc_cluster = hpc_cluster.strip().lower()
-        remote_comroot = remote_comroot.strip()
+    if isinstance(raw_comroot, str):
+        items = [raw_comroot]
+    elif isinstance(raw_comroot, (list, tuple)):
+        items = list(raw_comroot)
     else:
-        hpc_cluster = "localhost"
-        remote_comroot = comroot_raw
+        raise ValueError(f"COMROOT must be a string or list of strings, got {type(raw_comroot).__name__}")
 
-    # Check HPC config & connection info
-    hpc_configs = load_hpc_config()
-    c_info = hpc_configs.get(hpc_cluster, {})
-    username = c_info.get("username", "")
-    port = c_info.get("my_local_port", 0)
+    result: List[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item is None:
+            continue
+        val = str(item).strip()
+        if not val or val.lower() in ("null", "none", "~"):
+            continue
+        if val not in seen:
+            seen.add(val)
+            result.append(val)
+    return result
 
-    expname = extract_expname(remote_comroot)
 
-    # Prefix: use explicit if specified, otherwise auto-detect from COMROOT
-    raw_prefix = recipe.get("prefix")
-    if raw_prefix:
-        prefix = str(raw_prefix).strip()
-    else:
-        prefix = detect_prefix(remote_comroot, username, port)
-
-    # Default WGF list
+def _compile_template_specs(recipe: Dict[str, Any]) -> List[Tuple[str, List[str], Dict[str, Any], List[str], List[str]]]:
+    """Parses default cycle/fhr/WGF/tile settings and `graphics list` overrides from `recipe`."""
     raw_wgf = recipe.get("WGF", ["det"])
     default_wgf_list = raw_wgf if isinstance(raw_wgf, list) else [raw_wgf]
     default_wgf_list = [str(x).strip() for x in default_wgf_list if str(x).strip()]
 
-    # Default tile list
     raw_tile = recipe.get("tile", ["full"])
     default_tile_list = raw_tile if isinstance(raw_tile, list) else [raw_tile]
     default_tile_list = [str(x).strip() for x in default_tile_list if str(x).strip()]
 
-    # Default cycles and fhr from top-level "cycle:" and "fhr:"
     default_cycle_raw = recipe.get("cycle")
     if default_cycle_raw is None:
         def_cf = recipe.get("cycle and fhr") or recipe.get("cycle_and_fhr") or {}
@@ -720,7 +852,6 @@ def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str,
     default_cycles = parse_cycle_list(default_cycle_raw) if default_cycle_raw else []
     default_fhr_cfg = parse_fhr_config(default_fhr_raw)
 
-    # Graphics list from "graphics list" or legacy "graphics name template"
     raw_graphics = (
         recipe.get("graphics list")
         or recipe.get("graphics_list")
@@ -733,9 +864,7 @@ def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str,
     if not raw_graphics:
         raise ValueError("No 'graphics list' specified in recipe.")
 
-    tasks: List[Tuple[str, Path]] = []
-    clean_comroot = remote_comroot.rstrip("/")
-
+    compiled: List[Tuple[str, List[str], Dict[str, Any], List[str], List[str]]] = []
     for item in raw_graphics:
         item_template = None
         item_cycles = default_cycles
@@ -746,7 +875,6 @@ def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str,
         if isinstance(item, str):
             item_template = item.strip()
         elif isinstance(item, dict):
-            # Style B: dictionary where key is the template name and value is the override dictionary
             for k, v in item.items():
                 item_template = str(k).strip()
                 if isinstance(v, dict):
@@ -764,37 +892,124 @@ def build_download_list(recipe: Dict[str, Any], output_base: Path) -> Tuple[str,
                         item_tile_list = [str(x).strip() for x in t_list if str(x).strip()]
                 break
 
-        if not item_template:
-            continue
+        if item_template:
+            t_norm = re.sub(r"\.pg$", ".png", item_template, flags=re.IGNORECASE)
+            compiled.append((t_norm, item_cycles, item_fhr_cfg, item_wgf_list, item_tile_list))
 
-        # Normalize .pg to .png
-        t_norm = re.sub(r"\.pg$", ".png", item_template, flags=re.IGNORECASE)
-
-        for cyc_str in item_cycles:
-            pdy = cyc_str[:8]
-            cyc = cyc_str[8:10]
-            fhrs = resolve_fhrs_for_cycle(item_fhr_cfg, cyc_str)
-            for wgf in item_wgf_list:
-                for tile in item_tile_list:
-                    for fhr in fhrs:
-                        valid_time = f"{pdy}{cyc}{fhr:02d}"
-                        fhr_3d = f"{fhr:03d}"
-                        fname = (
-                            t_norm.replace("{tile}", tile)
-                            .replace("{TILE}", tile)
-                            .replace("{fhr}", fhr_3d)
-                            .replace("{FHR}", fhr_3d)
-                        )
-                        rem_path = (
-                            f"{clean_comroot}/{prefix}.{pdy}/{cyc}/graphics/{wgf}/{tile}/{valid_time}/{fname}"
-                        )
-                        local_path = output_base / expname / wgf / tile / cyc_str / fname
-                        tasks.append((rem_path, local_path))
-
-    return hpc_cluster, username, port, expname, prefix, tasks
+    return compiled
 
 
-def parse_args() -> argparse.Namespace:
+def build_download_targets(
+    recipe: Dict[str, Any],
+    output_base: Path,
+    hpc_users: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Builds per-COMROOT download target plans from recipe configuration.
+    Supports `COMROOT` as a single string or a list of strings (potentially across
+    multiple clusters and prefixes).
+    """
+    comroots = normalize_comroots(recipe.get("COMROOT"))
+    if not comroots:
+        raise ValueError("Missing 'COMROOT' in recipe.")
+
+    resolved_users = load_hpc_users() if hpc_users is None else hpc_users
+    compiled_specs = _compile_template_specs(recipe)
+    raw_prefix = recipe.get("prefix")
+    targets: List[Dict[str, Any]] = []
+
+    for comroot_raw in comroots:
+        if ":" in comroot_raw:
+            hpc_cluster, remote_comroot = comroot_raw.split(":", 1)
+            hpc_cluster = hpc_cluster.strip().lower()
+            remote_comroot = remote_comroot.strip()
+        else:
+            hpc_cluster = "localhost"
+            remote_comroot = comroot_raw
+
+        username = resolved_users.get(hpc_cluster, "") if hpc_cluster != "localhost" else ""
+        expname = extract_expname(remote_comroot)
+        if raw_prefix:
+            prefix = str(raw_prefix).strip()
+        else:
+            prefix = detect_prefix(remote_comroot, username, cluster=hpc_cluster)
+
+        tasks: List[Tuple[str, Path]] = []
+        clean_comroot = remote_comroot.rstrip("/")
+        for t_norm, item_cycles, item_fhr_cfg, item_wgf_list, item_tile_list in compiled_specs:
+            for cyc_str in item_cycles:
+                pdy = cyc_str[:8]
+                cyc = cyc_str[8:10]
+                fhrs = resolve_fhrs_for_cycle(item_fhr_cfg, cyc_str)
+                for wgf in item_wgf_list:
+                    for tile in item_tile_list:
+                        for fhr in fhrs:
+                            valid_time = f"{pdy}{cyc}{fhr:02d}"
+                            fhr_3d = f"{fhr:03d}"
+                            fname = (
+                                t_norm.replace("{tile}", tile)
+                                .replace("{TILE}", tile)
+                                .replace("{fhr}", fhr_3d)
+                                .replace("{FHR}", fhr_3d)
+                            )
+                            rem_path = (
+                                f"{clean_comroot}/{prefix}.{pdy}/{cyc}/graphics/{wgf}/{tile}/{valid_time}/{fname}"
+                            )
+                            local_path = output_base / expname / wgf / tile / cyc_str / fname
+                            tasks.append((rem_path, local_path))
+
+        targets.append({
+            "comroot": comroot_raw,
+            "cluster": hpc_cluster,
+            "remote_comroot": remote_comroot,
+            "username": username,
+            "expname": expname,
+            "prefix": prefix,
+            "tasks": tasks,
+        })
+
+    return targets
+
+
+def build_download_list(
+    recipe: Dict[str, Any],
+    output_base: Path,
+    hpc_users: Optional[Dict[str, str]] = None,
+) -> Tuple[str, str, str, str, List[Tuple[str, Path]]]:
+    """
+    Builds the combined list of (remote_path, local_path) tuples from recipe configuration.
+    Supports `COMROOT` as a single string or a list of strings, top-level 'cycle'/'fhr'
+    defaults, and per-graphic Style B overrides.
+    Returns (hpc_cluster, username, expname, prefix, tasks).
+    """
+    targets = build_download_targets(recipe, output_base, hpc_users=hpc_users)
+    all_tasks: List[Tuple[str, Path]] = []
+    clusters: List[str] = []
+    users: List[str] = []
+    expnames: List[str] = []
+    prefixes: List[str] = []
+
+    for tgt in targets:
+        all_tasks.extend(tgt["tasks"])
+        if tgt["cluster"] not in clusters:
+            clusters.append(tgt["cluster"])
+        if tgt["username"] and tgt["username"] not in users:
+            users.append(tgt["username"])
+        if tgt["expname"] not in expnames:
+            expnames.append(tgt["expname"])
+        if tgt["prefix"] not in prefixes:
+            prefixes.append(tgt["prefix"])
+
+    return (
+        clusters[0] if len(clusters) == 1 else ", ".join(clusters),
+        users[0] if len(users) == 1 else (", ".join(users) if users else ""),
+        expnames[0] if len(expnames) == 1 else ", ".join(expnames),
+        prefixes[0] if len(prefixes) == 1 else ", ".join(prefixes),
+        all_tasks,
+    )
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Download selected pygraf graphics from NOAA RDHPCS over SSH tunnel.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -802,7 +1017,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "recipe",
         type=Path,
-        help="Path to graphics download recipe YAML (e.g. recipes/download_pgraf_graphics.yaml)",
+        help="Path to graphics download recipe YAML (e.g. recipes/download_pygraf_graphics.yaml)",
     )
     parser.add_argument(
         "-o", "--output-dir",
@@ -825,11 +1040,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print verbose transfer details, including missing or uncopied files",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
 
     recipe_path = args.recipe
     if not recipe_path.is_file():
@@ -847,18 +1062,28 @@ def main() -> int:
         return 1
 
     try:
-        cluster, username, port, expname, prefix, tasks = build_download_list(recipe, args.output_dir)
+        targets = build_download_targets(recipe, args.output_dir)
     except Exception as e:
         print(f"Error parsing recipe: {e}", file=sys.stderr)
         return 1
 
+    total_tasks = sum(len(t["tasks"]) for t in targets)
+    unique_clusters = list(dict.fromkeys(t["cluster"] for t in targets))
+
     print("=" * 70)
-    print(f"[*] PYGRAF GRAPHICS DOWNLOAD: {expname}")
-    print(f"[*] Cluster:       {cluster}")
-    print(f"[*] Prefix:        {prefix}")
+    if len(targets) == 1:
+        t0 = targets[0]
+        print(f"[*] PYGRAF GRAPHICS DOWNLOAD: {t0['expname']}")
+        print(f"[*] Cluster:       {t0['cluster']}")
+        print(f"[*] Prefix:        {t0['prefix']}")
+        print(f"[*] Local Target:  {args.output_dir / t0['expname']}")
+    else:
+        print(f"[*] PYGRAF GRAPHICS DOWNLOAD ({len(targets)} experiments)")
+        print(f"[*] Clusters:      {', '.join(unique_clusters)}")
+        for idx_t, t in enumerate(targets, 1):
+            print(f"    [{idx_t}] {t['expname']} ({t['cluster']}, prefix={t['prefix']}, {len(t['tasks'])} files)")
     print(f"[*] Recipe:        {recipe_path.name}")
-    print(f"[*] Local Target:  {args.output_dir / expname}")
-    print(f"[*] Total Targets: {len(tasks)} files")
+    print(f"[*] Total Targets: {total_tasks} files")
     if args.debug:
         print(f"[*] Debug Mode:    ENABLED")
     print("=" * 70)
@@ -880,69 +1105,90 @@ def main() -> int:
                 def_list = fhr_cfg["default"]
                 print(f"  - Default cycles: {len(def_list)} lead(s) (F{def_list[0]:03d}-F{def_list[-1]:03d})")
 
+    all_tasks = [item for t in targets for item in t["tasks"]]
+
     if args.dry_run:
-        limit = len(tasks) if args.debug else 20
+        limit = len(all_tasks) if args.debug else 20
         print("\n[DRY RUN] Planned remote -> local file targets:")
-        for r_path, l_path in tasks[:limit]:
+        for r_path, l_path in all_tasks[:limit]:
             print(f"  {r_path}\n    -> {l_path}")
-        if len(tasks) > limit:
-            print(f"  ... and {len(tasks) - limit} more files (use --debug to display all).")
-        print(f"\n[✓] Dry run completed for {len(tasks)} files.")
+        if len(all_tasks) > limit:
+            print(f"  ... and {len(all_tasks) - limit} more files (use --debug to display all).")
+        print(f"\n[✓] Dry run completed for {len(all_tasks)} files.")
         return 0
 
-    # Verify cluster connection
-    if not username or not port:
-        print(f"\n[!] Error: Cluster '{cluster}' is not configured in .hpc_config.", file=sys.stderr)
-        return 1
+    # Verify background HPC terminal sessions for all required clusters
+    cluster_users: Dict[str, str] = {}
+    for t in targets:
+        if t["cluster"] not in cluster_users:
+            cluster_users[t["cluster"]] = t["username"]
+    unready_clusters: List[str] = []
+    for cluster in unique_clusters:
+        if args.debug:
+            print(f"\n[*] [DEBUG] Verifying background HPC terminal session: {cluster}...")
+        if not test_hpc_session_ready(cluster, cluster_users.get(cluster, "")):
+            unready_clusters.append(cluster)
 
-    if args.debug:
-        print(f"\n[*] [DEBUG] Verifying SSH tunnel access: {username}@localhost:{port}...")
-
-    if not test_local_access(username, port):
+    if unready_clusters:
         print("\n" + "=" * 70, file=sys.stderr)
-        print(f"[!] Local SSH connection to '{cluster}' is not ready (localhost:{port}).", file=sys.stderr)
-        print("[!] Please establish the SSH tunnel first in your terminal:", file=sys.stderr)
-        print(f"        ush/ssh_helper.py {cluster}", file=sys.stderr)
+        for cluster in unready_clusters:
+            print(f"[!] Background HPC terminal session for '{cluster}' is not ready.", file=sys.stderr)
+        print("[!] Please establish the HPC session first in your terminal:", file=sys.stderr)
+        for cluster in unready_clusters:
+            print(f"        ush/ssh_helper.py {cluster}", file=sys.stderr)
         print("    and then rerun.", file=sys.stderr)
         print("=" * 70 + "\n", file=sys.stderr)
         return 1
 
-    # Filter out already existing files unless --update
-    pending_tasks = []
-    already_cached = 0
-    for r_path, l_path in tasks:
-        if not args.update and l_path.exists() and l_path.stat().st_size > 0:
-            already_cached += 1
-        else:
-            pending_tasks.append((r_path, l_path))
-
-    if already_cached > 0:
-        print(f"[*] Local cache: {already_cached} file(s) already exist (skipped).")
-
-    if not pending_tasks:
-        print(f"[✓] All {len(tasks)} files are already downloaded and cached locally!")
-        return 0
-
-    print(f"[*] Starting download of {len(pending_tasks)} file(s) via streaming tar over SSH...\n")
-
-    completed = 0
-    missing = 0
-    failed = 0
-    t0 = time.time()
+    total_completed = 0
+    total_already_cached = 0
+    total_missing = 0
+    total_failed = 0
+    t_start = time.time()
 
     try:
-        completed, missing, failed = stream_tar_pull(
-            username=username,
-            port=port,
-            tasks=pending_tasks,
-            cluster=cluster,
-            debug=args.debug,
-        )
+        for idx_t, tgt in enumerate(targets, 1):
+            expname = tgt["expname"]
+            cluster = tgt["cluster"]
+            username = tgt["username"]
+            tasks = tgt["tasks"]
+
+            if len(targets) > 1:
+                print(f"\n[{idx_t}/{len(targets)}] Experiment: {expname} ({cluster})")
+
+            pending_tasks = []
+            already_cached = 0
+            for r_path, l_path in tasks:
+                if not args.update and l_path.exists() and l_path.stat().st_size > 0:
+                    already_cached += 1
+                else:
+                    pending_tasks.append((r_path, l_path))
+
+            total_already_cached += already_cached
+            if already_cached > 0:
+                print(f"[*] Local cache ({expname}): {already_cached} file(s) already exist (skipped).")
+
+            if not pending_tasks:
+                print(f"[✓] All {len(tasks)} files for '{expname}' are already downloaded and cached locally!")
+                continue
+
+            print(f"[*] Starting download of {len(pending_tasks)} file(s) for '{expname}' via streaming tar over SSH...\n")
+
+            try:
+                completed, missing, failed = stream_tar_pull(
+                    username=username,
+                    tasks=pending_tasks,
+                    cluster=cluster,
+                    debug=args.debug,
+                )
+                total_completed += completed
+                total_missing += missing
+                total_failed += failed
+            finally:
+                removed_count = cleanup_empty_directories(args.output_dir / expname)
+                if args.debug and removed_count > 0:
+                    print(f"\n[*] [DEBUG] Cleaned up {removed_count} empty directory(ies) under {expname}.")
     finally:
-        # Remove all empty directories if no files downloaded in them
-        removed_count = cleanup_empty_directories(args.output_dir / expname)
-        if args.debug and removed_count > 0:
-            print(f"\n[*] [DEBUG] Cleaned up {removed_count} empty directory(ies).")
         try:
             if args.output_dir.exists() and not any(args.output_dir.iterdir()):
                 args.output_dir.rmdir()
@@ -951,23 +1197,24 @@ def main() -> int:
         except OSError:
             pass
 
-    elapsed = time.time() - t0
-    target_exp_dir = args.output_dir / expname
+    elapsed = time.time() - t_start
     print("\n" + "=" * 70)
     print(f"[✓] Completed in {elapsed:.1f}s")
-    print(f"    - Downloaded:  {completed}")
-    print(f"    - Already had: {already_cached}")
-    if args.debug and missing > 0:
-        print(f"    - Missing:     {missing}")
-    if failed > 0:
-        print(f"    - Errors:      {failed}")
-    if target_exp_dir.exists():
-        print(f"    - Directory:   {target_exp_dir}")
-    else:
-        print(f"    - Directory:   (no files downloaded; empty directory removed)")
+    print(f"    - Downloaded:  {total_completed}")
+    print(f"    - Already had: {total_already_cached}")
+    if args.debug and total_missing > 0:
+        print(f"    - Missing:     {total_missing}")
+    if total_failed > 0:
+        print(f"    - Errors:      {total_failed}")
+    for tgt in targets:
+        target_exp_dir = args.output_dir / tgt["expname"]
+        if target_exp_dir.exists():
+            print(f"    - Directory:   {target_exp_dir}")
+        else:
+            print(f"    - Directory:   (no files downloaded for {tgt['expname']}; empty directory removed)")
     print("=" * 70)
 
-    return 0 if failed == 0 else 2
+    return 0 if total_failed == 0 else 2
 
 
 if __name__ == "__main__":

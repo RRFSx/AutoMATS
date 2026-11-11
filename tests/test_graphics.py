@@ -157,12 +157,12 @@ class GraphicsTests(unittest.TestCase):
             new_file2 = tmp / "new2.png"
 
             tasks = [
-                {"username": "user", "port": 40896, "remote_path": "/r/1", "local_path": cached_file, "cluster": "gaeac6"},
-                {"username": "user", "port": 40896, "remote_path": "/r/2", "local_path": new_file1, "cluster": "gaeac6"},
-                {"username": "user", "port": 40896, "remote_path": "/r/3", "local_path": new_file2, "cluster": "gaeac6"},
+                {"username": "user", "remote_path": "/r/1", "local_path": cached_file, "cluster": "gaeac6"},
+                {"username": "user", "remote_path": "/r/2", "local_path": new_file1, "cluster": "gaeac6"},
+                {"username": "user", "remote_path": "/r/3", "local_path": new_file2, "cluster": "gaeac6"},
             ]
 
-            def fake_stream_tar(username, port, tasks, cluster="HPC", debug=False):
+            def fake_stream_tar(username, tasks, cluster="HPC", debug=False):
                 for rpath, lpath in tasks:
                     lpath.write_bytes(b"downloaded")
                 return len(tasks), 0, 0
@@ -216,7 +216,6 @@ class GraphicsTests(unittest.TestCase):
             with patch("subprocess.Popen", return_value=mock_proc):
                 completed, missing, errors = stream_tar_pull(
                     username="user",
-                    port=40896,
                     tasks=tasks,
                     cluster="gaeac6",
                     debug=True,
@@ -230,6 +229,398 @@ class GraphicsTests(unittest.TestCase):
             self.assertTrue(out_file2.exists())
             self.assertEqual(out_file2.read_bytes(), b"PNG_IMAGE_2")
             self.assertFalse((tmp / "missing.png").exists())
+
+    def test_stream_tar_pull_shared_remote_path_to_multiple_destinations(self):
+        import io
+        import tarfile
+        from unittest.mock import MagicMock, patch
+        from automats.graphics import batch_pull_graphics_files, stream_tar_pull
+
+        class CapturingBytesIO(io.BytesIO):
+            def __init__(self):
+                super().__init__()
+                self.captured = b""
+
+            def close(self):
+                if not self.closed:
+                    self.captured = self.getvalue()
+                super().close()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            out_exp1 = tmp / "exp1" / "2024050700_006_cref_full_sfc_f006.png"
+            out_exp2 = tmp / "exp2" / "2024050700_006_cref_full_sfc_f006.png"
+
+            def make_tar_bytes():
+                buf = io.BytesIO()
+                with tarfile.open(fileobj=buf, mode="w") as tf:
+                    data = b"SHARED_CREF_PNG"
+                    ti = tarfile.TarInfo(name="/gpfs/shared/cref_full_sfc_f006.png")
+                    ti.size = len(data)
+                    tf.addfile(ti, io.BytesIO(data))
+                buf.seek(0)
+                return buf
+
+            stdin_cap = CapturingBytesIO()
+            mock_proc = MagicMock()
+            mock_proc.stdin = stdin_cap
+            mock_proc.stdout = make_tar_bytes()
+            mock_proc.stderr = io.BytesIO()
+            mock_proc.wait.return_value = 0
+
+            tasks = [
+                ("/gpfs/shared/cref_full_sfc_f006.png", out_exp1),
+                ("/gpfs/shared/cref_full_sfc_f006.png", out_exp2),
+            ]
+
+            with patch("subprocess.Popen", return_value=mock_proc):
+                completed, missing, errors = stream_tar_pull(
+                    username="user",
+                    tasks=tasks,
+                    cluster="gaeac6",
+                    debug=True,
+                )
+
+            self.assertEqual((completed, missing, errors), (2, 0, 0))
+            self.assertEqual(stdin_cap.captured, b"/gpfs/shared/cref_full_sfc_f006.png\x00")
+            self.assertEqual(out_exp1.read_bytes(), b"SHARED_CREF_PNG")
+            self.assertEqual(out_exp2.read_bytes(), b"SHARED_CREF_PNG")
+
+            # Also verify batch_pull_graphics_files delivers both local files end-to-end
+            out_b1 = tmp / "batch_exp1" / "cref.png"
+            out_b2 = tmp / "batch_exp2" / "cref.png"
+            mock_proc2 = MagicMock()
+            mock_proc2.stdin = CapturingBytesIO()
+            mock_proc2.stdout = make_tar_bytes()
+            mock_proc2.stderr = io.BytesIO()
+            mock_proc2.wait.return_value = 0
+
+            with patch("subprocess.Popen", return_value=mock_proc2):
+                results = batch_pull_graphics_files([
+                    {
+                        "username": "user",
+                        "remote_path": "/gpfs/shared/cref_full_sfc_f006.png",
+                        "local_path": out_b1,
+                        "cluster": "gaeac6",
+                    },
+                    {
+                        "username": "user",
+                        "remote_path": "/gpfs/shared/cref_full_sfc_f006.png",
+                        "local_path": out_b2,
+                        "cluster": "gaeac6",
+                    },
+                ])
+
+            self.assertTrue(results[str(out_b1)])
+            self.assertTrue(results[str(out_b2)])
+            self.assertEqual(out_b1.read_bytes(), b"SHARED_CREF_PNG")
+            self.assertEqual(out_b2.read_bytes(), b"SHARED_CREF_PNG")
+
+    def test_load_hpc_users_simple_format(self):
+        from automats.graphics import load_hpc_users
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = Path(tmpdir) / ".hpc_config"
+            cfg_path.write_text(
+                "# RDHPCS usernames by cluster\n"
+                "gaeac6: Guoqing.Ge\n"
+                "hera: 'Alt.User' # inline comment\n"
+                "ursa: <your_username>\n"
+                "gaeac7:\n"
+                "  username: Nested.User\n",
+                encoding="utf-8",
+            )
+            users = load_hpc_users(cfg_path)
+            self.assertEqual(
+                users,
+                {
+                    "gaeac6": "Guoqing.Ge",
+                    "hera": "Alt.User",
+                    "gaeac7": "Nested.User",
+                },
+            )
+
+    def test_process_graphics_slides_tracks_newly_saved_graphics_count(self):
+        from io import BytesIO
+        from unittest.mock import patch
+        from PIL import Image
+        from pptx import Presentation
+        from automats.graphics import process_graphics_slides
+
+        png_buf = BytesIO()
+        Image.new("RGB", (60, 40), color="navy").save(png_buf, format="PNG")
+        valid_png = png_buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gfx_recipe = tmp / "graphics_layout.yaml"
+            gfx_recipe.write_text(
+                "graphics slides:\n"
+                "- type: same valid time\n"
+                "  title: Reflectivity\n"
+                "  cycle: 2024050612\n"
+                "  graphics name: cref_full_sfc_f006.png\n"
+                "  number of rows: 1\n"
+                "  row1: [exp1, exp2, obs]\n",
+                encoding="utf-8",
+            )
+            plan = build_plan({
+                "common": {"start": "2024-05-06T00:00:00Z", "end": "2024-05-07T00:00:00Z"},
+                "experiments": [
+                    {"name": "exp1", "color": "red", "COMROOT": "gaeac6:/gpfs/exp1/com/rrfs/v2"},
+                    {"name": "exp2", "color": "blue", "COMROOT": "gaeac6:/gpfs/exp2/com/rrfs/v2"},
+                ],
+                "plots": [
+                    {
+                        "name": "sfc_tseries",
+                        "application": "surface",
+                        "plot_type": "time series",
+                        "variable": ["t2m"],
+                        "statistic": ["rmse"],
+                    }
+                ],
+                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+            })
+
+            # Pre-cache exp1 so only exp2 (1 pygraf) + obs (1 MRMS) are newly downloaded
+            cached_exp1 = tmp / "graphics" / "exp1" / "2024050612_006_cref_full_sfc_f006.png"
+            cached_exp1.parent.mkdir(parents=True, exist_ok=True)
+            cached_exp1.write_bytes(valid_png)
+
+            def fake_batch_pull(tasks, max_workers=1, debug=False):
+                results = {}
+                for t in tasks:
+                    loc = Path(t["local_path"])
+                    loc.parent.mkdir(parents=True, exist_ok=True)
+                    if not loc.exists():
+                        loc.write_bytes(valid_png)
+                    results[str(loc)] = True
+                return results
+
+            def fake_fetch_mrms(uncached, output_dir=None):
+                for item in uncached:
+                    dest = Path(item["dest_path"])
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    dest.write_bytes(valid_png)
+
+            deck = Presentation()
+            stats = {}
+            with (
+                patch("automats.graphics.test_hpc_session_ready", return_value=True),
+                patch("automats.graphics.batch_pull_graphics_files", side_effect=fake_batch_pull),
+                patch("automats.mrms.fetch_mrms_images", side_effect=fake_fetch_mrms),
+                patch("automats.graphics.is_valid_mrms_file", side_effect=lambda p: Path(p).exists() and Path(p).stat().st_size > 0),
+            ):
+                added = process_graphics_slides(plan, tmp, deck, stats=stats)
+
+            self.assertEqual(added, 1)
+            self.assertEqual(stats["saved"], 2)
+
+
+class BaselineC6Tests(unittest.TestCase):
+    @staticmethod
+    def _import_baselinec6():
+        import sys
+        ush_dir = str(Path(__file__).resolve().parents[1] / "ush")
+        if ush_dir not in sys.path:
+            sys.path.insert(0, ush_dir)
+        import baselinec6
+        return baselinec6
+
+    def _make_fake_root(self, tmp: Path) -> Path:
+        recipes_dir = tmp / "recipes"
+        recipes_dir.mkdir(parents=True, exist_ok=True)
+        (recipes_dir / "baseline.yaml").write_text(
+            "experiments:\n"
+            "- name: RRFSv2_conus_3km_ret_v2x_retv4\n"
+            "  color: red\n"
+            "  COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4\n"
+            "- name: existing_other\n"
+            "  color: blue\n"
+            "  COMROOT: gaeac6:/gpfs/f6/existing/com/rrfs/v2.1.4\n"
+            "pygraf graphics slides:\n"
+            "  enable: true\n"
+            "  recipe: graphics_slides_layout2_May2024.yaml\n"
+            "common:\n"
+            "  line weight: 3\n"
+            "plots:\n"
+            "- name: sfc_dieoff\n"
+            "  application: surface\n"
+            "  plot_type: dieoff\n"
+            "  variable: [t2m]\n"
+            "  statistic: [rmse]\n",
+            encoding="utf-8",
+        )
+        return tmp
+
+    def test_resolve_comroot_cluster_inference(self):
+        baselinec6 = self._import_baselinec6()
+        self.assertEqual(
+            baselinec6.resolve_comroot("/gpfs/f6/bil-fire10-oar/user/com/rrfs/v2.1.4/"),
+            "gaeac6:/gpfs/f6/bil-fire10-oar/user/com/rrfs/v2.1.4",
+        )
+        self.assertEqual(
+            baselinec6.resolve_comroot("/gpfs/f7/bil-fire10-oar/user/com/rrfs/v2.1.4"),
+            "gaeac7:/gpfs/f7/bil-fire10-oar/user/com/rrfs/v2.1.4",
+        )
+        self.assertEqual(baselinec6.resolve_comroot("/gpfs/f6"), "gaeac6:/gpfs/f6")
+        self.assertEqual(baselinec6.resolve_comroot("/gpfs/f7"), "gaeac7:/gpfs/f7")
+        self.assertEqual(
+            baselinec6.resolve_comroot("GAEAC7:/gpfs/f7/custom/path/"),
+            "gaeac7:/gpfs/f7/custom/path",
+        )
+        self.assertEqual(
+            baselinec6.resolve_comroot("ursa:/scratch3/user/com/rrfs/v2"),
+            "ursa:/scratch3/user/com/rrfs/v2",
+        )
+        with self.assertRaises(ValueError):
+            baselinec6.resolve_comroot("/gpfs/f60/not_f6")
+        with self.assertRaises(ValueError):
+            baselinec6.resolve_comroot("/scratch3/no_cluster_prefix")
+
+    def test_main_positional_expname_and_hpc_dir(self):
+        from unittest.mock import patch
+        import yaml
+
+        baselinec6 = self._import_baselinec6()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_fake_root(Path(tmpdir))
+            captured = {}
+
+            def fake_automats_main(cli_args):
+                captured["args"] = cli_args
+                return 0
+
+            with (
+                patch.object(baselinec6, "ROOT", root),
+                patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
+            ):
+                rc = baselinec6.main([
+                    "my_mats_exp",
+                    "/gpfs/f6/bil-fire10-oar/scratch/me/com/rrfs/v2.1.4/",
+                    "--slides-only",
+                ])
+
+            self.assertEqual(rc, 0)
+            tmp_recipe = Path(captured["args"][0])
+            self.assertEqual(tmp_recipe, root / "tmp" / "baseline_c6_my_mats_exp.yaml")
+            self.assertEqual(
+                captured["args"][1:],
+                ["--slides-only", "--output-dir", str(root / "results" / "baseline_c6_my_mats_exp")],
+            )
+
+            data = yaml.safe_load(tmp_recipe.read_text(encoding="utf-8"))
+            self.assertEqual(len(data["experiments"]), 2)
+            self.assertEqual(data["experiments"][0]["name"], "RRFSv2_conus_3km_ret_v2x_retv4")
+            self.assertEqual(data["experiments"][1]["name"], "my_mats_exp")
+            self.assertEqual(data["experiments"][1]["color"], "blue")
+            self.assertEqual(
+                data["experiments"][1]["COMROOT"],
+                "gaeac6:/gpfs/f6/bil-fire10-oar/scratch/me/com/rrfs/v2.1.4",
+            )
+            self.assertTrue(data["pygraf graphics slides"]["enable"])
+
+    def test_main_f7_with_leading_options_and_flags(self):
+        from unittest.mock import patch
+        import yaml
+
+        baselinec6 = self._import_baselinec6()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_fake_root(Path(tmpdir))
+            captured = {}
+
+            def fake_automats_main(cli_args):
+                captured["args"] = cli_args
+                return 0
+
+            with (
+                patch.object(baselinec6, "ROOT", root),
+                patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
+            ):
+                rc = baselinec6.main([
+                    "--output-dir", str(root / "custom_out"),
+                    "--limit", "2",
+                    "my_f7_exp",
+                    "/gpfs/f7/bil-fire10-oar/scratch/me/com/rrfs/v2.1.4",
+                ])
+
+            self.assertEqual(rc, 0)
+            tmp_recipe = Path(captured["args"][0])
+            data = yaml.safe_load(tmp_recipe.read_text(encoding="utf-8"))
+            self.assertEqual(data["experiments"][1]["name"], "my_f7_exp")
+            self.assertEqual(
+                data["experiments"][1]["COMROOT"],
+                "gaeac7:/gpfs/f7/bil-fire10-oar/scratch/me/com/rrfs/v2.1.4",
+            )
+            self.assertEqual(
+                captured["args"][1:],
+                ["--output-dir", str(root / "custom_out"), "--limit", "2"],
+            )
+
+            # Flag form --hpc-dir / --comroot also resolves /gpfs/f6 and /gpfs/f7
+            with (
+                patch.object(baselinec6, "ROOT", root),
+                patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
+            ):
+                rc2 = baselinec6.main([
+                    "--expname", "existing_other",
+                    "--hpc-dir", "/gpfs/f7/new_dir/com/rrfs/v2.1.4",
+                ])
+
+            self.assertEqual(rc2, 0)
+            data2 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(
+                data2["experiments"][1]["COMROOT"],
+                "gaeac7:/gpfs/f7/new_dir/com/rrfs/v2.1.4",
+            )
+
+    def test_main_rejects_swapped_or_ambiguous_args(self):
+        from contextlib import redirect_stderr
+        import io
+        from unittest.mock import patch
+        baselinec6 = self._import_baselinec6()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_fake_root(Path(tmpdir))
+            with patch.object(baselinec6, "ROOT", root), redirect_stderr(io.StringIO()):
+                # Directory path given first instead of expname
+                self.assertEqual(baselinec6.main(["/gpfs/f6/some/path", "my_exp"]), 1)
+                # Bare non-/gpfs/f6,/gpfs/f7 path without <cluster>:
+                self.assertEqual(baselinec6.main(["my_exp", "/scratch3/some/path"]), 1)
+                # Extra unexpected positional argument
+                self.assertEqual(baselinec6.main(["my_exp", "/gpfs/f6/some/path", "extra"]), 1)
+
+    def test_main_omitted_hpc_dir_disables_graphics_download(self):
+        from unittest.mock import patch
+        import yaml
+
+        baselinec6 = self._import_baselinec6()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = self._make_fake_root(Path(tmpdir))
+            captured = {}
+
+            def fake_automats_main(cli_args):
+                captured["args"] = cli_args
+                return 0
+
+            with (
+                patch.object(baselinec6, "ROOT", root),
+                patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
+            ):
+                rc1 = baselinec6.main(["existing_other", "--plan"])
+                data1 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
+                rc2 = baselinec6.main(["brand_new_exp", "--plan"])
+                data2 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
+
+            self.assertEqual(rc1, 0)
+            self.assertNotIn("COMROOT", data1["experiments"][1])
+            self.assertFalse(data1["pygraf graphics slides"]["enable"])
+            self.assertEqual(rc2, 0)
+            self.assertNotIn("COMROOT", data2["experiments"][1])
+            self.assertFalse(data2["pygraf graphics slides"]["enable"])
 
 
 if __name__ == "__main__":

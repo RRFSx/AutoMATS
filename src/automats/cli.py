@@ -141,27 +141,69 @@ def main(argv=None) -> int:
                 print(f"Warning: Slide generation disabled: {plan.slide_error}", file=sys.stderr)
             return 0
         if args.slides_only:
-            deck = build_slides(plan, args.output_dir)
+            missing_figures: list[tuple[str, str]] = []
+            graphics_stats: dict[str, int] = {"saved": 0}
+            deck = build_slides(
+                plan,
+                args.output_dir,
+                missing=missing_figures,
+                graphics_stats=graphics_stats,
+            )
+            if plan.pygraf_graphics and plan.pygraf_graphics.enable:
+                print(
+                    f"Saved {graphics_stats['saved']} graphics under {(args.output_dir / 'graphics').resolve()}",
+                    flush=True,
+                )
             print(f"Saved slides to {deck.resolve()}", flush=True)
+            if missing_figures:
+                unique_missing = len({path for path, _ in missing_figures})
+                print(
+                    f"Warning: Used placeholders for {unique_missing} missing/unreadable MATS figure(s).",
+                    file=sys.stderr,
+                )
             return 0
         deck = None
+        failed_plots: list[tuple[object, str]] = []
+        missing_figures = []
+        graphics_stats = {"saved": 0}
         with ProgressDisplay(len(plan.jobs)) as progress:
             count = run_plan(plan, args.output_dir, args.limit, not args.show_browser,
                      metadata_only=args.metadata_only, show_browser=args.show_browser,
                      update=args.update,
-                     log=progress.log, status=progress.update)
+                     log=progress.log, status=progress.update, failures=failed_plots)
             if plan.slides or (plan.pygraf_graphics and plan.pygraf_graphics.enable) or plan.slide_error is not None:
                 if not args.metadata_only and args.limit is not None and args.limit < len(plan.jobs):
                     progress.log("Slides skipped for a partial --limit run; use --slides-only to build from existing PNGs")
                 else:
                     progress.update("Building PowerPoint slides")
                     try:
-                        deck = build_slides(plan, args.output_dir)
+                        deck = build_slides(
+                            plan,
+                            args.output_dir,
+                            log=progress.log,
+                            missing=missing_figures,
+                            graphics_stats=graphics_stats,
+                        )
                     except Exception as error:
                         progress.log(f"Warning: Slide generation failed: {error}. Saved figures are retained.")
-        print(f"Saved {count} figures under {args.output_dir.resolve()}", flush=True)
+        print(f"Saved {count} MATS figures under {args.output_dir.resolve()}", flush=True)
+        if deck is not None and plan.pygraf_graphics and plan.pygraf_graphics.enable:
+            print(
+                f"Saved {graphics_stats['saved']} graphics under {(args.output_dir / 'graphics').resolve()}",
+                flush=True,
+            )
+        if failed_plots:
+            print(f"Warning: Skipped {len(failed_plots)} failed MATS plot(s):", file=sys.stderr)
+            for failed_job, reason in failed_plots:
+                print(f"  - {failed_job.relative_path}: {reason}", file=sys.stderr)
         if deck is not None:
             print(f"Saved slides to {deck.resolve()}", flush=True)
+        if missing_figures:
+            unique_missing = len({path for path, _ in missing_figures})
+            print(
+                f"Warning: Used placeholders for {unique_missing} missing/unreadable MATS figure(s).",
+                file=sys.stderr,
+            )
         return 0
     except KeyboardInterrupt:
         print("Interrupted. Completed figures are retained for resume.", file=sys.stderr)

@@ -2,15 +2,16 @@
 """Run baseline comparison: compare <expname> against Gaea C6 baseline."""
 
 import os
-import sys
 from pathlib import Path
+import re
+import sys
 import yaml
 
 # Auto-re-exec with local venv python if invoked by system python or another interpreter
 ROOT = Path(__file__).resolve().parent.parent
 venv_dir = ROOT / ".venv"
 venv_python = venv_dir / "bin" / "python"
-if venv_python.is_file() and Path(sys.prefix).resolve() != venv_dir.resolve():
+if __name__ == "__main__" and venv_python.is_file() and Path(sys.prefix).resolve() != venv_dir.resolve():
     os.execv(str(venv_python), [str(venv_python), str(Path(__file__).resolve())] + sys.argv[1:])
 
 sys.path.insert(0, str(ROOT / "src"))
@@ -20,17 +21,57 @@ from automats.cli import main as automats_main
 BASELINE_EXPERIMENT = "RRFSv2_conus_3km_ret_v2x_retv4"
 
 
+def resolve_comroot(hpc_dir: str) -> str:
+    """
+    Normalizes an HPC directory / COMROOT string into `<cluster>:<path>`.
+    - Existing `<cluster>:<path>` prefixes are preserved (lowercased cluster).
+    - Bare paths starting with `/gpfs/f6` map to `gaeac6:<path>`.
+    - Bare paths starting with `/gpfs/f7` map to `gaeac7:<path>`.
+    """
+    raw = str(hpc_dir).strip()
+    if not raw:
+        raise ValueError("HPC directory cannot be empty.")
+
+    m_cluster = re.match(r"^([A-Za-z0-9_-]+):(.*)$", raw)
+    if m_cluster:
+        cluster = m_cluster.group(1).strip().lower()
+        path = m_cluster.group(2).strip()
+        if not path:
+            raise ValueError(f"Missing path after cluster prefix in '{raw}'.")
+        clean_path = path.rstrip("/") or "/"
+        return f"{cluster}:{clean_path}"
+
+    clean_path = raw.rstrip("/") or "/"
+    if clean_path == "/gpfs/f6" or clean_path.startswith("/gpfs/f6/"):
+        return f"gaeac6:{clean_path}"
+    if clean_path == "/gpfs/f7" or clean_path.startswith("/gpfs/f7/"):
+        return f"gaeac7:{clean_path}"
+
+    raise ValueError(
+        f"Cannot infer HPC cluster from '{raw}'. Paths starting with /gpfs/f6 map to gaeac6 "
+        "and /gpfs/f7 map to gaeac7; otherwise prefix with <cluster>: (e.g. ursa:/path)."
+    )
+
+
 def usage(error_msg=None):
     if error_msg:
         print(f"Error: {error_msg}\n", file=sys.stderr)
     print(
-        f"Usage: {Path(__file__).name} <expname> [additional automats options...]\n"
+        f"Usage: {Path(__file__).name} <expname> [hpc_dir] [additional automats options...]\n"
         "\n"
-        f"Compares <expname> against the Gaea C6 baseline ({BASELINE_EXPERIMENT}).\n"
+        f"Compares <expname> (experiment name in MATS) against the Gaea C6 baseline ({BASELINE_EXPERIMENT}).\n"
+        "If [hpc_dir] is provided, sets COMROOT for <expname> to download pygraf graphics:\n"
+        "  - /gpfs/f6/... -> gaeac6:/gpfs/f6/...\n"
+        "  - /gpfs/f7/... -> gaeac7:/gpfs/f7/...\n"
+        "  - <cluster>:/path -> preserved as-is (e.g. ursa:/scratch3/...)\n"
+        "If [hpc_dir] is omitted, no graphics are downloaded (pygraf graphics slides disabled).\n"
         "Reuses recipes/baseline.yaml by overwriting its experiments section and saving a temporary\n"
         "recipe under ./tmp/.\n"
         "\n"
         "Common options:\n"
+        "  --expname NAME     Experiment name in MATS (alternative to positional <expname>)\n"
+        "  --hpc-dir, --comroot DIR\n"
+        "                     HPC directory (COMROOT) for downloading graphics\n"
         "  --output-dir DIR   Output directory (default: results/baseline_c6_<expname>)\n"
         "  --plan             List planned figures without running browser\n"
         "  --metadata-only    Refresh metadata on cached figures locally\n"
@@ -52,7 +93,7 @@ def main(argv=None):
         return 0
 
     expname = None
-    comroot = None
+    hpc_dir = None
     forward_args = []
     i = 0
     while i < len(argv):
@@ -69,24 +110,49 @@ def main(argv=None):
                 return 1
         elif arg.startswith("--expname="):
             expname = arg.split("=", 1)[1]
-        elif arg == "--comroot":
+        elif arg in ("--comroot", "--hpc-dir", "--hpc_dir", "--dir"):
             i += 1
             if i < len(argv):
-                comroot = argv[i]
+                hpc_dir = argv[i]
             else:
-                usage("Missing value for --comroot")
+                usage(f"Missing value for {arg}")
                 return 1
-        elif arg.startswith("--comroot="):
-            comroot = arg.split("=", 1)[1]
-        elif not arg.startswith("-") and expname is None:
-            expname = arg
-        else:
+        elif arg.startswith(("--comroot=", "--hpc-dir=", "--hpc_dir=", "--dir=")):
+            hpc_dir = arg.split("=", 1)[1]
+        elif arg in ("--output-dir", "--limit"):
             forward_args.append(arg)
+            i += 1
+            if i < len(argv):
+                forward_args.append(argv[i])
+            else:
+                usage(f"Missing value for {arg}")
+                return 1
+        elif arg.startswith("-"):
+            forward_args.append(arg)
+        elif expname is None:
+            expname = arg
+        elif hpc_dir is None:
+            hpc_dir = arg
+        else:
+            usage(f"Unexpected positional argument: {arg}")
+            return 1
         i += 1
 
     if not expname:
         usage("Missing required <expname> argument")
         return 1
+
+    if expname.startswith("/") or "/" in expname:
+        usage(f"Invalid <expname> '{expname}': expected MATS experiment name first, then [hpc_dir]")
+        return 1
+
+    resolved_comroot = None
+    if hpc_dir is not None:
+        try:
+            resolved_comroot = resolve_comroot(hpc_dir)
+        except ValueError as e:
+            usage(str(e))
+            return 1
 
     baseline_recipe = ROOT / "recipes" / "baseline.yaml"
     if not baseline_recipe.is_file():
@@ -104,10 +170,15 @@ def main(argv=None):
     base_exp = dict(existing_by_name.get(BASELINE_EXPERIMENT, {"name": BASELINE_EXPERIMENT}))
     base_exp["color"] = "red"
 
-    target_exp = dict(existing_by_name.get(expname, {"name": expname}))
-    target_exp["color"] = "blue"
-    if comroot:
-        target_exp["COMROOT"] = comroot
+    target_exp = {"name": expname, "color": "blue"}
+    if resolved_comroot:
+        target_exp["COMROOT"] = resolved_comroot
+    else:
+        # Without an input hpc_dir, there are no graphics to download for this comparison
+        if isinstance(data.get("pygraf graphics slides"), dict):
+            data["pygraf graphics slides"]["enable"] = False
+        else:
+            data["pygraf graphics slides"] = {"enable": False}
 
     # Overwrite experiments for C6 baseline comparison (baseline first, then target experiment)
     data["experiments"] = [base_exp, target_exp]

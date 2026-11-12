@@ -85,7 +85,11 @@ def figure_header(job: PlotJob, effective: dict | None = None) -> list[str]:
             fields[-1] = "RMSE (solid) + BIAS (dashed)"
         if job.lead is not None:
             fields.insert(2, job.lead_tag + "h")
-        for parameter in ("dieoff-type", "top", "bottom", "averaging"):
+        plot_type = str(effective.get("plot_type") or "").strip()
+        dieoff_type = str(curve.get("dieoff-type") or "").strip()
+        if plot_type.casefold() == "dieoff" and dieoff_type and dieoff_type.casefold() != "dieoff":
+            fields.append("Valid Time" if dieoff_type.casefold().replace("_", " ") == "valid time" else dieoff_type)
+        for parameter in ("top", "bottom", "averaging"):
             if parameter in curve:
                 fields.append(f"{parameter}={curve[parameter]}")
         return [", ".join(str(field) for field in fields if field != "")]
@@ -206,18 +210,11 @@ ANNOTATE_IMAGE = r"""async ({image, header, experiments, diffExperiments=[], sou
         return {placed, height: totalH || legLineHeight, rows: rowCount};
     };
 
-    const primaryLayout = layoutGroup(experiments, 0);
-    let totalLegendHeight = primaryLayout.height;
-    let totalRows = primaryLayout.rows;
-    let allPlaced = [...primaryLayout.placed];
-
-    if (diffExperiments && diffExperiments.length > 0) {
-        const diffGap = Math.max(4, Math.round(legPx * 0.2));
-        const diffLayout = layoutGroup(diffExperiments, primaryLayout.height + diffGap);
-        totalLegendHeight = primaryLayout.height + diffGap + diffLayout.height;
-        totalRows += diffLayout.rows;
-        allPlaced.push(...diffLayout.placed);
-    }
+    const legendItems = [...experiments, ...(diffExperiments || [])];
+    const legendLayout = layoutGroup(legendItems, 0);
+    const totalLegendHeight = legendLayout.height;
+    const totalRows = legendLayout.rows;
+    const allPlaced = legendLayout.placed;
 
     const topPad = Math.max(4, Math.round(descPx * 0.25));
     const sectionGap = Math.max(4, Math.round(Math.max(descPx, legPx) * 0.2));
@@ -256,11 +253,14 @@ ANNOTATE_IMAGE = r"""async ({image, header, experiments, diffExperiments=[], sou
         context.fillStyle = 'white';
         context.fillRect(0, headerHeight, canvas.width, 18);
     }
-    const allNames = [...experiments.map(e => e.name), ...(diffExperiments || []).map(e => e.name)];
+    const allNames = legendItems.map(e => e.name);
     return {image:canvas.toDataURL('image/png'), width:canvas.width,
             height:canvas.height, header_height:headerHeight,
+            description_height:metadataHeight,
+            legend_top:legendTop,
             legend_rows:totalRows, legend_in_header:true,
             legend_names:allNames,
+            legend_items:legendItems.map(e => ({name:e.name, color:e.color})),
             description_font_size:descPx,
             legend_font_size:legPx};
 }"""
@@ -274,6 +274,14 @@ def resolve_diff_entries(job: PlotJob, plot_params: dict | None = None,
     if plot_params and "curves" in plot_params:
         entries = []
         curves_list = plot_params["curves"]
+        exp_map = {
+            job.curve_label(exp, stat, lead).casefold(): exp.display_name
+            for exp in job.experiments
+            for lead in job.leads
+            for stat in job.statistics
+        }
+        exp_map.update({re.sub(r"[^A-Za-z0-9]", "", exp.name).casefold(): exp.display_name for exp in job.experiments})
+        exp_map.update({exp.name.casefold(): exp.display_name for exp in job.experiments})
         for c in curves_list:
             diff_from = c.get("diffFrom")
             if diff_from and len(diff_from) == 2:
@@ -281,8 +289,6 @@ def resolve_diff_entries(job: PlotJob, plot_params: dict | None = None,
                 if idx_a < len(curves_list) and idx_b < len(curves_list):
                     raw_a = curves_list[idx_a].get("data-source") or curves_list[idx_a].get("label") or f"Curve {idx_a + 1}"
                     raw_b = curves_list[idx_b].get("data-source") or curves_list[idx_b].get("label") or f"Curve {idx_b + 1}"
-                    exp_map = {re.sub(r"[^A-Za-z0-9]", "", exp.name).casefold(): exp.name for exp in job.experiments}
-                    exp_map.update({exp.name.casefold(): exp.name for exp in job.experiments})
                     name_a = exp_map.get(raw_a.casefold(), raw_a)
                     name_b = exp_map.get(raw_b.casefold(), raw_b)
                     entries.append({
@@ -304,10 +310,10 @@ def resolve_diff_entries(job: PlotJob, plot_params: dict | None = None,
             colors = ["rgb(255,165,0)"]
         else:
             colors = ["rgb(95,95,95)", "rgb(238,130,238)", "#2ca02c", "#8c564b", "rgb(255,165,0)"]
-        base_exp = job.experiments[0].name
+        base_exp = job.experiments[0].display_name
         for i, exp in enumerate(job.experiments[1:]):
             entries.append({
-                "name": f"{exp.name} - {base_exp}",
+                "name": f"{exp.display_name} - {base_exp}",
                 "color": colors[i % len(colors)]
             })
         return entries
@@ -332,7 +338,11 @@ def annotate_image(page, job: PlotJob, image: bytes, previous_figure: dict | Non
     if plotted_curves is not None and len(plotted_curves) < len(job.curves):
         plotted_names = {c.get("name") for c in plotted_curves if c.get("name")}
         if len(job.leads) == 1:
-            filtered = [asdict(exp) for exp in job.experiments if exp.name in plotted_names]
+            filtered = [
+                asdict(entry)
+                for entry, exp in zip(job.legend_entries, job.experiments)
+                if exp.name in plotted_names
+            ]
         else:
             filtered = [
                 asdict(entry) for entry, (exp, lead) in zip(
@@ -361,7 +371,8 @@ def annotate_image(page, job: PlotJob, image: bytes, previous_figure: dict | Non
     if not rendered["image"].startswith(prefix):
         raise RunError("Metadata rendering did not return a PNG")
     metadata = {key: rendered[key] for key in (
-        "width", "height", "header_height", "legend_rows", "legend_in_header", "legend_names",
+        "width", "height", "header_height", "description_height", "legend_top",
+        "legend_rows", "legend_in_header", "legend_names", "legend_items",
         "description_font_size", "legend_font_size")}
     metadata["header"] = header
     metadata["legend_styles"] = ["solid"]

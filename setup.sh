@@ -23,5 +23,6 @@ elif [ ! -x "$venv_python" ]; then
 fi
 
 "$venv_python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else "AutoMATS requires Python 3.10 or newer.")'
-"$venv_python" -m pip install "$script_dir"
+"$venv_python" -m pip install 'PyYAML>=6.0,<7' 'playwright>=1.49,<2' 'python-pptx>=1.0.2,<2'
+"$venv_python" -m pip uninstall -y automats >/dev/null 2>&1 || true
 printf 'Setup complete. Run: "%s/run.sh" --help\n' "$script_dir"

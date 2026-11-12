@@ -18,10 +18,9 @@ Use `--show-browser` to keep it visible for debugging
 cd AutoMATS
 ./setup.sh
 ```
-The setup script creates a private `.venv` and installs AutoMATS, PyYAML,
-Playwright, and PowerPoint dependencies automatically. 
+The setup script creates a private `.venv` and installs PyYAML, Playwright, and
+PowerPoint dependencies automatically.
 It does not change your system or Conda packages.
-**Rerun setup if you update the source code
 
 ### Run
 

@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import struct
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -12,7 +13,7 @@ import unittest
 import zlib
 from unittest.mock import Mock, patch
 
-from automats.config import Settings, STATISTICS, build_plan
+from automats.config import Settings, STATISTICS, build_plan, load_plan
 from automats.browser import EXPORT_IMAGE, Throttled, UpperAirBrowser, annotate_image, discover_applications, figure_header, minimize_window, resolve_application, retry_after_seconds
 from automats.cli import ProgressDisplay, main
 from automats.runner import CHROMIUM_ARGS, CHROMIUM_IGNORE_DEFAULT_ARGS, DEFAULT_USER_AGENT, FIGURE_STYLE_VERSION, FatalRunError, PNG_SIGNATURE, QueryPacer, ResolutionError, ResultStore, RunError, figure_exists, is_png, lock_error, resolve_option, run_plan, validate_curves, validate_effective_curves
@@ -958,6 +959,78 @@ class MetadataTests(unittest.TestCase):
             "2026-10-01 00:00 - 2026-10-15 00:00, RAOBs (Traditional), "
             "HRRR domain, 1-1000 hPa, T, RMSE"])
 
+        # MATS includes default 'dieoff-type': 'Dieoff' in curveParams across all plot types;
+        # omit 'dieoff-type=Dieoff' everywhere, and ignore dieoff-type outside Dieoff plots.
+        date_range = {"start": "2024-05-06T10:00:00+00:00", "end": "2024-05-13T00:00:00+00:00"}
+        tseries_effective = {
+            "plot_type": "TimeSeries",
+            "date_range": date_range,
+            "curves": [{
+                "truth": "METAR",
+                "region": "All HRRR domain",
+                "variable": "Temperature at 2m (°C)",
+                "statistic": "RMSE",
+                "dieoff-type": "Dieoff",
+            }],
+        }
+        self.assertEqual(figure_header(job, tseries_effective), [
+            "2024-05-06 10:00 - 2024-05-13 00:00, TimeSeries, f000h, METAR, "
+            "All HRRR domain, Temperature at 2m (°C), RMSE"])
+        tseries_valid_time = deepcopy(tseries_effective)
+        tseries_valid_time["curves"][0]["dieoff-type"] = "Valid time"
+        self.assertEqual(figure_header(job, tseries_valid_time), figure_header(job, tseries_effective))
+
+        profile_effective = {
+            "plot_type": "Profile",
+            "date_range": date_range,
+            "curves": [{
+                "truth": "RAOBs (Traditional)",
+                "region": "HRRR domain",
+                "variable": "Temperature",
+                "statistic": "RMSE",
+                "dieoff-type": "Dieoff",
+                "top": "1",
+                "bottom": "1000",
+                "averaging": "None",
+            }],
+        }
+        self.assertEqual(figure_header(job, profile_effective), [
+            "2024-05-06 10:00 - 2024-05-13 00:00, Profile, f000h, RAOBs (Traditional), "
+            "HRRR domain, Temperature, RMSE, top=1, bottom=1000, averaging=None"])
+
+        dieoff_job = replace(job, lead=None)
+        for default_value in ("Dieoff", "dieoff", None):
+            dieoff_default = {
+                "plot_type": "Dieoff",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Temperature at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": default_value,
+                }],
+            }
+            self.assertEqual(figure_header(dieoff_job, dieoff_default), [
+                "2024-05-06 10:00 - 2024-05-13 00:00, Dieoff, METAR, "
+                "All HRRR domain, Temperature at 2m (°C), RMSE"])
+
+        for valid_time_value in ("Valid time", "Valid Time", "valid_time"):
+            dieoff_non_default = {
+                "plot_type": "Dieoff",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Temperature at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": valid_time_value,
+                }],
+            }
+            self.assertEqual(figure_header(dieoff_job, dieoff_non_default), [
+                "2024-05-06 10:00 - 2024-05-13 00:00, Dieoff, METAR, "
+                "All HRRR domain, Temperature at 2m (°C), RMSE, Valid Time"])
+
     def test_header_is_rendered_above_the_image_without_network(self):
         try:
             from playwright.sync_api import sync_playwright
@@ -1108,9 +1181,25 @@ class MetadataTests(unittest.TestCase):
                     ]
                 }
                 diff_annotated, diff_meta = annotate_image(page, diff_job, bytes(image), plot_params=plot_params)
-                self.assertEqual(diff_meta["legend_rows"], 2)
+                self.assertEqual(diff_meta["legend_rows"], 1)
                 self.assertEqual(diff_meta["legend_names"], ["RRFSv2x", "RRFSv2b", "RRFSv2b - RRFSv2x"])
                 self.assertEqual(diff_meta["diff_legend_names"], ["RRFSv2b - RRFSv2x"])
+
+                # Difference legend items still wrap onto a second line only when the row exceeds available width.
+                crowded_diff_exps = (
+                    replace(job.experiments[0], name="RRFSv2_conus_3km_long_baseline_name"),
+                    replace(job.experiments[1], name="RRFSv2_conus_3km_long_experiment_name"),
+                )
+                crowded_diff_job = replace(diff_job, experiments=crowded_diff_exps)
+                crowded_diff_params = {
+                    "curves": [
+                        {"data-source": crowded_diff_exps[0].name, "label": "exp1", "color": "rgb(255,0,0)", "diffFrom": None},
+                        {"data-source": crowded_diff_exps[1].name, "label": "exp2", "color": "rgb(0,0,255)", "diffFrom": None},
+                        {"data-source": crowded_diff_exps[1].name, "label": "diff", "color": "rgb(255,165,0)", "diffFrom": [1, 0]},
+                    ]
+                }
+                _, crowded_diff_meta = annotate_image(page, crowded_diff_job, bytes(image), plot_params=crowded_diff_params)
+                self.assertGreaterEqual(crowded_diff_meta["legend_rows"], 2)
             finally:
                 browser.close()
 
@@ -1204,6 +1293,8 @@ class MetadataTests(unittest.TestCase):
                 wrapped_img, wrapped_meta = annotate_image(
                     page, replace(job, statistic="rmse+bias"), portrait, effective_settings=effective,
                 )
+                self.assertNotIn("dieoff-type", wrapped_meta["header"][0])
+                self.assertIn("top=1, bottom=1000, averaging=None", wrapped_meta["header"][0])
                 self.assertGreater(wrapped_meta["header_height"], 110)
                 # Row 1 ends cleanly before "averaging=None" (width ~177px) wraps to row 2 rather than splitting mid-word.
                 line_metrics = page.evaluate("""async ({image, descPx}) => {
@@ -1294,6 +1385,291 @@ class MetadataTests(unittest.TestCase):
             self.assertEqual(store_after_custom.state["results"][custom_job.relative_path]["header_style"], [20, 22])
             self.assertEqual(fig_meta_custom["height"] - fig_meta_custom["header_height"], 300)
             self.assertLess(fig_meta_custom["header_height"], fig_meta_v9["header_height"])
+
+    def test_short_name_renders_short_legends_and_refreshes_legacy_cache_via_metadata_only(self):
+        try:
+            from io import BytesIO
+            from PIL import Image
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.skipTest("Playwright or Pillow is not installed")
+
+        raw = example()
+        raw["experiments"] = [
+            {"name": "RRFSv2_conus_3km_ret_v2x_retv4", "color": "red", "overlay": True},
+            {"name": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km", "color": "blue", "overlay": True},
+        ]
+        raw["plots"][0]["forecast lead time"] = [0, "0+3"]
+        plan_long = build_plan(raw)
+        job_long = plan_long.jobs[0]
+
+        raw_short = deepcopy(raw)
+        raw_short["experiments"][0]["short name"] = "base4"
+        raw_short["experiments"][1]["short name"] = "3p5km"
+        plan_short = build_plan(raw_short)
+        plan_short_single = replace(plan_short, jobs=plan_short.jobs[:1])
+        job_short = plan_short.jobs[0]
+        grouped_short = plan_short.jobs[1]
+        self.assertEqual(job_long.fingerprint, job_short.fingerprint)
+
+        with sync_playwright() as manager:
+            try:
+                browser = manager.chromium.launch(channel="chrome", headless=True)
+            except Exception as error:
+                self.skipTest(f"Installed Chrome unavailable: {error}")
+            try:
+                page = browser.new_page()
+                chart = bytes(page.evaluate("""() => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 1600; canvas.height = 300;
+                    const context = canvas.getContext('2d');
+                    context.fillStyle = 'green'; context.fillRect(0, 0, 1600, 300);
+                    return Array.from(Uint8Array.from(atob(canvas.toDataURL('image/png').split(',')[1]),
+                        character => character.charCodeAt(0)));
+                }"""))
+
+                # 1. Single-lead primary legend + partial curve filtering + grouped leads + diff curves
+                _, meta_short = annotate_image(page, job_short, chart)
+                self.assertEqual(meta_short["legend_names"], ["base4", "3p5km"])
+
+                _, meta_partial = annotate_image(
+                    page, job_short, chart,
+                    plotted_curves=[{"name": "RRFSv2_conus_3km_ret_v2x_retv4", "lead": 0}],
+                )
+                self.assertEqual(meta_partial["legend_names"], ["base4"])
+
+                _, meta_grouped = annotate_image(page, grouped_short, chart)
+                self.assertEqual(meta_grouped["legend_names"], ["base4 f000h", "base4 f003h"])
+
+                diff_job = replace(job_short, parameters=(("Difference curves", "Diff all curves against the 1st added curve"),))
+                plot_params = {
+                    "curves": [
+                        {"data-source": "RRFSv2_conus_3km_ret_v2x_retv4", "label": "RRFSv2conus3kmretv2xretv4", "diffFrom": None},
+                        {"data-source": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km", "label": "RRFSv2conus3kmretv2xretv4p13p5km", "diffFrom": None},
+                        {"data-source": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km", "label": "diff", "color": "rgb(255,165,0)", "diffFrom": [1, 0]},
+                    ]
+                }
+                _, meta_diff_params = annotate_image(page, diff_job, chart, plot_params=plot_params)
+                self.assertEqual(meta_diff_params["legend_rows"], 1)
+                self.assertEqual(meta_diff_params["legend_names"], ["base4", "3p5km", "3p5km - base4"])
+                self.assertEqual(meta_diff_params["diff_legend_names"], ["3p5km - base4"])
+                self.assertEqual(
+                    meta_diff_params["legend_items"],
+                    [
+                        {"name": "base4", "color": "red"},
+                        {"name": "3p5km", "color": "blue"},
+                        {"name": "3p5km - base4", "color": "rgb(255,165,0)"},
+                    ],
+                )
+                self.assertGreater(meta_diff_params["description_height"], 0)
+                self.assertLessEqual(meta_diff_params["description_height"], meta_diff_params["legend_top"])
+                self.assertLess(meta_diff_params["legend_top"], meta_diff_params["header_height"])
+
+                diff_png, meta_diff_fallback = annotate_image(page, diff_job, chart)
+                self.assertEqual(meta_diff_fallback["legend_rows"], 1)
+                self.assertEqual(meta_diff_fallback["legend_names"], ["base4", "3p5km", "3p5km - base4"])
+                self.assertGreater(meta_diff_fallback["legend_top"], meta_diff_fallback["description_height"])
+                from automats.slides import _prepare_slide_png
+                no_legend_png, _, no_legend_h = _prepare_slide_png(
+                    diff_png,
+                    meta_diff_fallback["width"],
+                    meta_diff_fallback["height"],
+                    meta_diff_fallback,
+                    drop_caption=False,
+                    drop_legend=True,
+                )
+                no_cap_png, _, no_cap_h = _prepare_slide_png(
+                    diff_png,
+                    meta_diff_fallback["width"],
+                    meta_diff_fallback["height"],
+                    meta_diff_fallback,
+                    drop_caption=True,
+                    drop_legend=False,
+                )
+                both_dropped_png, _, both_h = _prepare_slide_png(
+                    diff_png,
+                    meta_diff_fallback["width"],
+                    meta_diff_fallback["height"],
+                    meta_diff_fallback,
+                    drop_caption=True,
+                    drop_legend=True,
+                )
+                self.assertEqual(both_h, 300)
+                self.assertLess(both_h, no_legend_h)
+                self.assertLess(both_h, no_cap_h)
+                self.assertLess(no_legend_h, meta_diff_fallback["height"])
+                self.assertLess(no_cap_h, meta_diff_fallback["height"])
+                with Image.open(BytesIO(no_cap_png)) as cap_stripped_img:
+                    # Top strip of retained legend PNG starts cleanly in white before legend ink
+                    top_band = cap_stripped_img.crop((0, 0, meta_diff_fallback["width"], 2)).convert("RGB")
+                    self.assertGreaterEqual(min(top_band.getextrema()[0][0], top_band.getextrema()[1][0], top_band.getextrema()[2][0]), 245)
+
+                # 2. Cached figure rendered previously with long names transitions cleanly via --metadata-only
+                old_png, old_meta = annotate_image(page, job_long, chart, plot_params=plot_params)
+            finally:
+                browser.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            figures = root / "figures"
+            store = ResultStore(figures, plan_long.settings.base_url)
+            store.save(job_long, old_png, {
+                "figure": old_meta,
+                "plot_params": plot_params,
+                "curves": [{"name": "RRFSv2_conus_3km_ret_v2x_retv4", "lead": 0}],
+            })
+            # Simulate a pre-short_name record lacking 'legend_labels'
+            del store.state["results"][job_long.relative_path]["legend_labels"]
+            store.flush()
+
+            self.assertTrue(store.completed(job_long))
+            self.assertFalse(store.completed(job_short))
+            self.assertTrue(store.completed(job_short, current_style=False))
+
+            with patch("automats.runner.Path.home", return_value=root), redirect_stdout(StringIO()):
+                self.assertEqual(run_plan(plan_short_single, figures, metadata_only=True), 1)
+                self.assertEqual(run_plan(plan_short_single, figures, metadata_only=True), 0)
+
+            store_after = ResultStore(figures, plan_short_single.settings.base_url)
+            self.assertTrue(store_after.completed(job_short))
+            refreshed_rec = store_after.state["results"][job_short.relative_path]
+            self.assertEqual(refreshed_rec["legend_labels"], ["base4", "3p5km"])
+            self.assertEqual(refreshed_rec["mats"]["figure"]["legend_names"], ["base4", "3p5km - base4"])
+            with Image.open(BytesIO((figures / job_short.relative_path).read_bytes())) as refreshed_img:
+                self.assertEqual(refreshed_img.size[1] - refreshed_rec["mats"]["figure"]["header_height"], 300)
+
+            # Updating a short name also triggers a local refresh
+            raw_renamed = deepcopy(raw_short)
+            raw_renamed["experiments"][1]["short name"] = "exp3p5"
+            plan_renamed = build_plan(raw_renamed)
+            plan_renamed_single = replace(plan_renamed, jobs=plan_renamed.jobs[:1])
+            self.assertFalse(store_after.completed(plan_renamed_single.jobs[0]))
+            self.assertTrue(store_after.completed(plan_renamed_single.jobs[0], current_style=False))
+            with patch("automats.runner.Path.home", return_value=root), redirect_stdout(StringIO()):
+                self.assertEqual(run_plan(plan_renamed_single, figures, metadata_only=True), 1)
+            self.assertEqual(
+                ResultStore(figures, plan_renamed.settings.base_url).state["results"][job_short.relative_path]["legend_labels"],
+                ["base4", "exp3p5"],
+            )
+
+    def test_dieoff_type_suppression_refreshes_cached_v9_figures_via_metadata_only(self):
+        try:
+            from io import BytesIO
+            from PIL import Image
+            from playwright.sync_api import sync_playwright  # noqa: F401
+        except ImportError:
+            self.skipTest("Playwright or Pillow is not installed")
+
+        raw = example()
+        raw["plots"] = [
+            {
+                "name": "sfc_tseries", "application": "surface", "truth": "METAR",
+                "plot_type": "time series", "region": "All HRRR domain",
+                "variable": ["t2m"], "statistic": ["rmse"], "forecast lead time": [0],
+            },
+            {
+                "name": "sfc_dieoff", "application": "surface", "truth": "METAR",
+                "plot_type": "dieoff", "region": "All HRRR domain",
+                "variable": ["t2m"], "statistic": ["rmse"],
+            },
+            {
+                "name": "sfc_valid_time", "application": "surface", "truth": "METAR",
+                "plot_type": "dieoff", "region": "All HRRR domain",
+                "variable": ["td2m"], "statistic": ["rmse"],
+                "Difference curves": "Diff all curves against the 1st added curve",
+            },
+        ]
+        plan = build_plan(raw)
+        tseries_job, dieoff_job, valid_time_diff_job = plan.jobs
+        self.assertGreaterEqual(FIGURE_STYLE_VERSION, 11)
+
+        v9_canvas = Image.new("RGB", (1200, 360), "green")
+        v9_canvas.paste(Image.new("RGB", (1200, 60), "white"), (0, 0))
+        buf = BytesIO()
+        v9_canvas.save(buf, format="PNG")
+        v9_bytes = buf.getvalue()
+
+        date_range = {"start": "2024-05-06T10:00:00+00:00", "end": "2024-05-13T00:00:00+00:00"}
+        effective_by_path = {
+            tseries_job.relative_path: {
+                "plot_type": "TimeSeries",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Temperature at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": "Dieoff",
+                }],
+            },
+            dieoff_job.relative_path: {
+                "plot_type": "Dieoff",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Temperature at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": "Dieoff",
+                }],
+            },
+            valid_time_diff_job.relative_path: {
+                "plot_type": "Dieoff",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Dewpoint at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": "Valid time",
+                }],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            figures = root / "figures"
+            store = ResultStore(figures, plan.settings.base_url)
+            for job, version in ((tseries_job, 9), (dieoff_job, 9), (valid_time_diff_job, 10)):
+                store.save(job, v9_bytes, {
+                    "effective_settings": effective_by_path[job.relative_path],
+                    "figure": {
+                        "width": 1200,
+                        "height": 360,
+                        "header_height": 60,
+                        "legend_in_header": True,
+                        "header": [
+                            "2024-05-06 10:00 - 2024-05-13 00:00, "
+                            f"{effective_by_path[job.relative_path]['plot_type']}, "
+                            "METAR, All HRRR domain, Variable, RMSE, dieoff-type=Dieoff"
+                        ],
+                    },
+                })
+                store.state["results"][job.relative_path]["figure_style_version"] = version
+            store.flush()
+
+            for job in plan.jobs:
+                self.assertFalse(store.completed(job))
+                self.assertTrue(store.completed(job, current_style=False))
+
+            with patch("automats.runner.Path.home", return_value=root), redirect_stdout(StringIO()):
+                self.assertEqual(run_plan(plan, figures, metadata_only=True), 3)
+                self.assertEqual(run_plan(plan, figures, metadata_only=True), 0)
+
+            refreshed_store = ResultStore(figures, plan.settings.base_url)
+            for job in plan.jobs:
+                self.assertTrue(refreshed_store.completed(job))
+                record = refreshed_store.state["results"][job.relative_path]
+                self.assertEqual(record["figure_style_version"], FIGURE_STYLE_VERSION)
+                fig_meta = record["mats"]["figure"]
+                self.assertNotIn("dieoff-type", fig_meta["header"][0])
+                self.assertEqual(fig_meta["height"] - fig_meta["header_height"], 300)
+                with Image.open(BytesIO((figures / job.relative_path).read_bytes())) as refreshed_img:
+                    self.assertEqual(refreshed_img.size[1] - fig_meta["header_height"], 300)
+            valid_time_meta = refreshed_store.state["results"][valid_time_diff_job.relative_path]["mats"]["figure"]
+            self.assertEqual(valid_time_meta["legend_rows"], 1)
+            self.assertEqual(valid_time_meta["diff_legend_names"], ["RRFSv2b - RRFSv2x"])
+            self.assertTrue(valid_time_meta["header"][0].endswith(", Valid Time"))
 
 
 class ControlPacingTests(unittest.TestCase):
@@ -2492,15 +2868,460 @@ class SlideTests(unittest.TestCase):
                 ],
             )
 
+    def test_slide_deduplication_shared_caption_and_legend_box_layouts(self):
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from pptx.util import Inches
+
+        def make_annotated_png(w: int, h: int, desc_h: int, leg_top: int, hh: int, chart_color: str) -> bytes:
+            img = Image.new("RGB", (w, h), "white")
+            draw = ImageDraw.Draw(img)
+            # Simulated caption band (y = 10..desc_h-6), clean white gap (desc_h..leg_top),
+            # simulated legend band (y = leg_top+4..hh-6), then chart body (hh..h).
+            draw.rectangle((40, 12, w - 40, desc_h - 6), fill=(35, 35, 35))
+            draw.rectangle((40, leg_top + 4, min(w - 40, 420), hh - 6), fill=(220, 40, 40))
+            draw.rectangle((0, hh, w, h), fill=chart_color)
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+
+        def assert_no_overlaps(slide):
+            boxes = [
+                (s.name or f"shape_{i}", (s.left, s.top, s.left + s.width, s.top + s.height))
+                for i, s in enumerate(slide.shapes)
+                if not s.name.startswith("Legend Swatch ")
+                and not s.name.startswith("Legend Marker ")
+                and not s.name.startswith("Legend Label ")
+            ]
+            for i in range(len(boxes)):
+                for j in range(i + 1, len(boxes)):
+                    a = boxes[i][1]
+                    b = boxes[j][1]
+                    ox = max(a[0], b[0]) < min(a[2], b[2]) - 100
+                    oy = max(a[1], b[1]) < min(a[3], b[3]) - 100
+                    self.assertFalse(ox and oy, f"Overlap between {boxes[i][0]} and {boxes[j][0]}: {a} vs {b}")
+
+        raw = example()
+        raw["experiments"] = [
+            {"name": "RRFS_BASE", "short name": "base4", "color": "red"},
+            {"name": "RRFS_NEW", "short name": "3p5km", "color": "blue"},
+        ]
+        raw["plots"] = [
+            {
+                "name": "sfc_dieoff", "application": "surface", "plot_type": "dieoff",
+                "truth": "METAR", "region": "All HRRR domain",
+                "variable": ["t2m", "td2m", "wind10m"], "statistic": ["rmse+bias"],
+            },
+            {
+                "name": "radar_dieoff", "application": "radar", "plot_type": "dieoff",
+                "truth": "MRMS", "region": "CONUS",
+                "variable": "Composite Reflectivity", "statistic": ["csi"],
+                "Threshold": [25, 35, 45],
+            },
+            {
+                "name": "ceiling_dieoff", "application": "ceil-vis", "plot_type": "dieoff",
+                "truth": "METAR", "region": "CONUS",
+                "variable": "Ceiling", "statistic": ["csi"],
+                "Threshold": [500, 1000, 3000, 6000],
+            },
+        ]
+        raw["slides"] = [
+            {
+                "plot group": "sfc_dieoff", "title": "Different Captions Same Legend (2+1)",
+                "number of rows": 2,
+                "row1": ["t2m_rmse+bias", "td2m_rmse+bias"],
+                "row2": ["wind10m_rmse+bias"],
+            },
+            {
+                "plot group": "radar_dieoff", "title": "Same Caption Same Legend (2+1)",
+                "number of rows": 2,
+                "row1": ["threshold25", "threshold35"],
+                "row2": ["threshold45"],
+            },
+            {
+                "plot group": "ceiling_dieoff", "title": "Full 2x2 Grid Same Caption Same Legend",
+                "number of rows": 2,
+                "row1": ["threshold500", "threshold1000"],
+                "row2": ["threshold3000", "threshold6000"],
+            },
+            {
+                "plot group": "radar_dieoff", "title": "Same Caption Different Legends (2+1)",
+                "number of rows": 2,
+                "row1": ["threshold25", "threshold35"],
+                "row2": ["threshold45"],
+            },
+            {
+                "plot group": "sfc_dieoff", "title": "Different Captions Different Legends",
+                "number of rows": 2,
+                "row1": ["t2m_rmse+bias", "td2m_rmse+bias"],
+                "row2": ["wind10m_rmse+bias"],
+            },
+        ]
+        plan = build_plan(raw)
+
+        # Customize slides 4 and 5 in a separate output dir so we don't mutate records shared with slides 1-2.
+        w, h, desc_h, leg_top, hh = 1600, 1020, 42, 50, 96
+        orig_bytes_by_path = {}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "deck1"
+            store = ResultStore(output, plan.settings.base_url)
+            common_leg = [{"name": "base4", "color": "red"}, {"name": "3p5km", "color": "blue"}]
+            sfc_idx = 0
+            for job in plan.jobs:
+                png = make_annotated_png(w, h, desc_h, leg_top, hh, "navy")
+                orig_bytes_by_path[job.relative_path] = png
+                if job.name == "sfc_dieoff":
+                    sfc_idx += 1
+                    header = [f"2024-05-0{sfc_idx}, Dieoff, {job.variable_tag}, RMSE"]
+                elif job.name == "radar_dieoff":
+                    header = ["2024-05-06, Dieoff, Composite Reflectivity, CSI"]
+                else:
+                    header = ["2024-05-06, Dieoff, Ceiling, CSI"]
+                store.save(job, png, {
+                    "figure": {
+                        "width": w,
+                        "height": h,
+                        "header_height": hh,
+                        "description_height": desc_h,
+                        "legend_top": leg_top,
+                        "legend_rows": 1,
+                        "legend_in_header": True,
+                        "legend_names": ["base4", "3p5km"],
+                        "legend_items": common_leg,
+                        "legend_styles": ["solid"],
+                        "header": header,
+                        "description_font_size": 24,
+                        "legend_font_size": 28,
+                    },
+                })
+
+            plan_three = replace(plan, slides=plan.slides[:3])
+            deck = Presentation(build_slides(plan_three, output))
+            self.assertEqual(len(deck.slides), 4)
+
+            # Verify original PNG files on disk were NOT modified
+            for rel, expected in orig_bytes_by_path.items():
+                self.assertEqual((output / rel).read_bytes(), expected)
+
+            # Slide 1: Different captions + Same legend -> NO shared caption, legend stripped, bottom-right legend card
+            s1 = deck.slides[1]
+            assert_no_overlaps(s1)
+            self.assertIsNone(next((s for s in s1.shapes if s.name == "Slide Shared Caption"), None))
+            leg1 = next((s for s in s1.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg1)
+            self.assertGreaterEqual(leg1.left, deck.slide_width // 2)
+            self.assertGreaterEqual(leg1.top, Inches(4.0))
+            self.assertEqual(
+                [s.text for s in s1.shapes if s.name.startswith("Legend Label ")],
+                ["base4", "3p5km"],
+            )
+            pics1 = [s for s in s1.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            for pic in pics1:
+                with Image.open(BytesIO(pic.image.blob)) as im:
+                    self.assertLess(im.size[1], h)
+                    self.assertGreater(im.size[1], h - hh)
+
+            # Slide 2: Same caption + Same legend -> Shared caption under title, full header cropped, bottom-right legend card
+            s2 = deck.slides[2]
+            assert_no_overlaps(s2)
+            cap2 = next((s for s in s2.shapes if s.name == "Slide Shared Caption"), None)
+            self.assertIsNotNone(cap2)
+            self.assertEqual(cap2.text, "2024-05-06, Dieoff, Composite Reflectivity, CSI")
+            self.assertEqual(cap2.top, Inches(0.55))
+            self.assertLessEqual(cap2.top + cap2.height, Inches(0.90))
+            leg2 = next((s for s in s2.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg2)
+            self.assertGreaterEqual(leg2.left, deck.slide_width // 2)
+            self.assertGreaterEqual(leg2.top, Inches(4.0))
+            pics2 = [s for s in s2.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            for pic in pics2:
+                with Image.open(BytesIO(pic.image.blob)) as im:
+                    self.assertEqual(im.size, (w, h - hh))
+
+            # Slide 3: Full 2x2 grid + Same caption + Same legend -> compact legend in middle of middle empty column
+            s3 = deck.slides[3]
+            assert_no_overlaps(s3)
+            self.assertIsNotNone(next((s for s in s3.shapes if s.name == "Slide Shared Caption"), None))
+            leg3 = next((s for s in s3.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg3)
+            pics3 = sorted([s for s in s3.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE], key=lambda p: (p.top, p.left))
+            col0_right = max(pics3[0].left + pics3[0].width, pics3[2].left + pics3[2].width)
+            col1_left = min(pics3[1].left, pics3[3].left)
+            self.assertGreaterEqual(leg3.left, col0_right)
+            self.assertLessEqual(leg3.left + leg3.width, col1_left)
+            mid_y = (Inches(0.9) + (deck.slide_height - Inches(0.25))) / 2
+            self.assertAlmostEqual(leg3.top + leg3.height / 2, mid_y, delta=Inches(0.2))
+            self.assertLessEqual(leg3.width, Inches(1.1))
+            self.assertLessEqual(leg3.height, Inches(0.55))
+
+            # Now test Slide 4 (Same caption + Different legends) and Slide 5 (Different captions + Different legends)
+            output2 = Path(directory) / "deck2"
+            store2 = ResultStore(output2, plan.settings.base_url)
+            diff_leg_jobs = [j for j in plan.jobs if j.name in ("radar_dieoff", "sfc_dieoff")]
+            for idx, job in enumerate(diff_leg_jobs):
+                png = make_annotated_png(w, h, desc_h, leg_top, hh, "teal")
+                header = ["2024-05-06, Dieoff, Shared"] if job.name == "radar_dieoff" else [f"2024-05-06, Diff {idx}"]
+                items = [{"name": f"exp_{idx}", "color": "green"}] if idx == 0 else [{"name": f"exp_{idx}", "color": "blue"}]
+                store2.save(job, png, {
+                    "figure": {
+                        "width": w,
+                        "height": h,
+                        "header_height": hh,
+                        "description_height": desc_h,
+                        "legend_top": leg_top,
+                        "legend_rows": 1,
+                        "legend_in_header": True,
+                        "legend_names": [items[0]["name"]],
+                        "legend_items": items,
+                        "legend_styles": ["solid"],
+                        "header": header,
+                        "description_font_size": 24,
+                        "legend_font_size": 28,
+                    },
+                })
+            plan_two = replace(plan, slides=(plan.slides[3], plan.slides[4]))
+            deck2 = Presentation(build_slides(plan_two, output2))
+
+            # Slide 1 of deck2: Same caption + Different legends -> Shared caption added, NO legend box, caption-only cropped
+            s_cap_only = deck2.slides[1]
+            assert_no_overlaps(s_cap_only)
+            self.assertIsNotNone(next((s for s in s_cap_only.shapes if s.name == "Slide Shared Caption"), None))
+            self.assertIsNone(next((s for s in s_cap_only.shapes if s.name == "Slide Shared Legend"), None))
+            for pic in [s for s in s_cap_only.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]:
+                with Image.open(BytesIO(pic.image.blob)) as im:
+                    self.assertLess(im.size[1], h)
+                    self.assertGreater(im.size[1], h - hh)
+
+            # Slide 2 of deck2: Different captions + Different legends -> byte-for-byte original PNGs kept
+            s_none = deck2.slides[2]
+            assert_no_overlaps(s_none)
+            self.assertIsNone(next((s for s in s_none.shapes if s.name == "Slide Shared Caption"), None))
+            self.assertIsNone(next((s for s in s_none.shapes if s.name == "Slide Shared Legend"), None))
+            for pic in [s for s in s_none.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]:
+                self.assertEqual(pic.image.blob, (output2 / pic.name).read_bytes())
+
+    def test_slide_deduplication_handles_missing_placeholder_and_legacy_v10_state(self):
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+        w, h, hh = 1600, 1020, 96
+        img = Image.new("RGB", (w, h), "white")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((40, 10, w - 40, 38), fill=(35, 35, 35))
+        draw.rectangle((40, 56, 400, hh - 8), fill=(220, 40, 40))
+        draw.rectangle((0, hh, w, h), fill="navy")
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        v10_png = buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            store = ResultStore(output, self.plan.settings.base_url)
+            # Leave job 0 missing so slide uses a placeholder for row1 col1, while jobs 1 and 2 have v10 state
+            for job in self.plan.jobs[1:]:
+                store.save(job, v10_png, {
+                    "figure": {
+                        "width": w,
+                        "height": h,
+                        "header_height": hh,
+                        "legend_rows": 1,
+                        "legend_in_header": True,
+                        "legend_names": ["RRFSv2x", "RRFSv2b"],
+                        "legend_styles": ["solid"],
+                        "header": ["2024-05-06, Dieoff, Legacy Header"],
+                        "description_font_size": 24,
+                        "legend_font_size": 28,
+                    },
+                })
+            missing = []
+            deck = Presentation(build_slides(self.plan, output, log=lambda _: None, missing=missing))
+            self.assertEqual(len(missing), 1)
+            slide = deck.slides[1]
+            self.assertIsNotNone(next((s for s in slide.shapes if s.name == "Slide Shared Caption"), None))
+            self.assertIsNotNone(next((s for s in slide.shapes if s.name == "Slide Shared Legend"), None))
+            pics = [s for s in slide.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            # Placeholder keeps full job dimensions while existing real PNGs get cropped
+            with Image.open(BytesIO(pics[0].image.blob)) as ph_img:
+                self.assertEqual(ph_img.size, (self.plan.jobs[0].width, self.plan.jobs[0].height))
+            for real_pic in pics[1:]:
+                with Image.open(BytesIO(real_pic.image.blob)) as cropped:
+                    self.assertEqual(cropped.size, (w, h - hh))
+
+    def test_slide_deduplication_variable_lead_captions_2x3_and_1x1_layouts(self):
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from pptx.util import Inches
+
+        def make_png(w: int, h: int, desc_h: int, leg_top: int, hh: int) -> bytes:
+            img = Image.new("RGB", (w, h), "white")
+            draw = ImageDraw.Draw(img)
+            draw.rectangle((40, 10, w - 40, desc_h - 6), fill=(35, 35, 35))
+            draw.rectangle((40, leg_top + 4, min(w - 40, 420), hh - 6), fill=(40, 80, 220))
+            draw.rectangle((0, hh, w, h), fill="navy")
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+
+        def assert_no_overlaps(slide):
+            boxes = [
+                (s.name or f"shape_{i}", (s.left, s.top, s.left + s.width, s.top + s.height))
+                for i, s in enumerate(slide.shapes)
+                if not s.name.startswith("Legend Swatch ")
+                and not s.name.startswith("Legend Marker ")
+                and not s.name.startswith("Legend Label ")
+            ]
+            for i in range(len(boxes)):
+                for j in range(i + 1, len(boxes)):
+                    a = boxes[i][1]
+                    b = boxes[j][1]
+                    ox = max(a[0], b[0]) < min(a[2], b[2]) - 100
+                    oy = max(a[1], b[1]) < min(a[3], b[3]) - 100
+                    self.assertFalse(ox and oy, f"Overlap between {boxes[i][0]} and {boxes[j][0]}: {a} vs {b}")
+
+        raw = example()
+        raw["experiments"] = [
+            {"name": "RRFS_BASE", "short name": "base4", "color": "red"},
+            {"name": "RRFS_NEW", "short name": "3p5km", "color": "blue"},
+        ]
+        raw["plots"] = [
+            {
+                "name": "ua_dieoff", "application": "Upper Air", "plot_type": "dieoff",
+                "truth": "RAOBs (Traditional)", "region": "HRRR domain",
+                "variable": ["T", "RHobT", "Wind"], "statistic": ["rmse+bias"],
+            },
+            {
+                "name": "ua_profile", "application": "Upper Air", "plot_type": "profile",
+                "truth": "RAOBs (Traditional)", "region": "HRRR domain",
+                "variable": ["T", "RHobT", "Wind"], "statistic": ["rmse+bias"],
+                "forecast lead time": [3, 6],
+            },
+            {
+                "name": "ua_tseries", "application": "Upper Air", "plot_type": "time series",
+                "truth": "RAOBs (Traditional)", "region": "HRRR domain",
+                "variable": ["T"], "statistic": ["rmse+bias"],
+                "forecast lead time": [1],
+            },
+        ]
+        raw["slides"] = [
+            {
+                "plot group": "ua_dieoff", "title": "Upper Air Dieoff",
+                "number of rows": 2,
+                "row1": ["T_rmse+bias", "RHobT_rmse+bias"],
+                "row2": ["Wind_rmse+bias"],
+            },
+            {
+                "plot group": "ua_profile", "title": "Upper Air Profile f003, f006",
+                "number of rows": 2,
+                "row1": ["T_rmse+bias_f003", "RHobT_rmse+bias_f003", "Wind_rmse+bias_f003"],
+                "row2": ["T_rmse+bias_f006", "RHobT_rmse+bias_f006", "Wind_rmse+bias_f006"],
+            },
+            {
+                "plot group": "ua_tseries", "title": "Upper Air Time Series RMSE+Bias f001h",
+                "number of rows": 1,
+                "row1": ["T_rmse+bias_f001"],
+            },
+        ]
+        plan = build_plan(raw)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            store = ResultStore(output, plan.settings.base_url)
+            common_leg = [{"name": "base4", "color": "red"}, {"name": "3p5km", "color": "blue"}]
+            for job in plan.jobs:
+                w, h = job.width, job.height + 96
+                desc_h, leg_top, hh = 42, 50, 96
+                png = make_png(w, h, desc_h, leg_top, hh)
+                if job.name == "ua_dieoff":
+                    header = [f"2024-05-06, Dieoff, RAOBs, HRRR domain, {job.variable}, RMSE (solid) + BIAS (dashed), dieoff-type=Dieoff, top=1, bottom=1000"]
+                elif job.name == "ua_profile":
+                    header = [f"2024-05-06, Profile, f{job.lead:03d}h, RAOBs, HRRR domain, {job.variable}, RMSE (solid) + BIAS (dashed), top=1, bottom=1000"]
+                else:
+                    header = ["2024-05-06, TimeSeries, f001h, RAOBs, HRRR domain, Temperature, RMSE (solid) + BIAS (dashed), top=1, bottom=1000"]
+                store.save(job, png, {
+                    "effective_settings": {"curves": [{"variable": job.variable}]},
+                    "figure": {
+                        "width": w,
+                        "height": h,
+                        "header_height": hh,
+                        "description_height": desc_h,
+                        "legend_top": leg_top,
+                        "legend_rows": 1,
+                        "legend_in_header": True,
+                        "legend_names": ["base4", "3p5km"],
+                        "legend_items": common_leg,
+                        "legend_styles": ["solid"],
+                        "header": header,
+                        "description_font_size": 24,
+                        "legend_font_size": 28,
+                    },
+                })
+
+            deck = Presentation(build_slides(plan, output))
+            self.assertEqual(len(deck.slides), 4)
+
+            # Slide 1: Upper Air Dieoff (2+1) -> single shared caption omitting variable, dieoff-type stripped, compact bottom-right legend
+            s1 = deck.slides[1]
+            assert_no_overlaps(s1)
+            cap1 = next((s for s in s1.shapes if s.name == "Slide Shared Caption"), None)
+            self.assertIsNotNone(cap1)
+            self.assertEqual(cap1.text, "2024-05-06, Dieoff, RAOBs, HRRR domain, RMSE (solid) + BIAS (dashed), top=1, bottom=1000")
+            leg1 = next((s for s in s1.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg1)
+            self.assertGreaterEqual(leg1.left, deck.slide_width // 2)
+            self.assertGreaterEqual(leg1.top, Inches(4.0))
+            self.assertLessEqual(leg1.width, Inches(1.1))
+
+            # Slide 2: Upper Air Profile f003, f006 (2x3) -> single shared caption omitting variable & lead, legend in col 1..2 middle gap
+            s2 = deck.slides[2]
+            assert_no_overlaps(s2)
+            cap2 = next((s for s in s2.shapes if s.name == "Slide Shared Caption"), None)
+            self.assertIsNotNone(cap2)
+            self.assertEqual(cap2.text, "2024-05-06, Profile, RAOBs, HRRR domain, RMSE (solid) + BIAS (dashed), top=1, bottom=1000")
+            for pic in [s for s in s2.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]:
+                with Image.open(BytesIO(pic.image.blob)) as im:
+                    self.assertEqual(im.size, (1200, 1200))
+            leg2 = next((s for s in s2.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg2)
+            pics2 = sorted([s for s in s2.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE], key=lambda p: (p.top, p.left))
+            col1_right = max(pics2[1].left + pics2[1].width, pics2[4].left + pics2[4].width)
+            col2_left = min(pics2[2].left, pics2[5].left)
+            self.assertGreaterEqual(leg2.left, col1_right)
+            self.assertLessEqual(leg2.left + leg2.width, col2_left)
+            mid_y = (Inches(0.9) + (deck.slide_height - Inches(0.25))) / 2
+            self.assertAlmostEqual(leg2.top + leg2.height / 2, mid_y, delta=Inches(0.2))
+
+            # Slide 3: Upper Air Time Series (1x1) -> single shared caption, bottom-right legend strip below full figure
+            s3 = deck.slides[3]
+            assert_no_overlaps(s3)
+            self.assertIsNotNone(next((s for s in s3.shapes if s.name == "Slide Shared Caption"), None))
+            leg3 = next((s for s in s3.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg3)
+            pics3 = [s for s in s3.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            self.assertGreaterEqual(leg3.top, pics3[0].top + pics3[0].height)
+            self.assertLessEqual(leg3.top + leg3.height, deck.slide_height)
+            self.assertGreaterEqual(leg3.left, deck.slide_width // 2)
+
 
 class CliTests(unittest.TestCase):
     recipe = Path(__file__).resolve().parent / "upperair.yaml"
 
     def test_ctrl_c_returns_130_and_stops_progress_display(self):
         output = StringIO()
-        with patch("automats.cli.run_plan", side_effect=KeyboardInterrupt), \
-            redirect_stdout(output), redirect_stderr(output):
-            self.assertEqual(main([str(self.recipe)]), 130)
+        prev = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                with patch("automats.cli.run_plan", side_effect=KeyboardInterrupt), \
+                    redirect_stdout(output), redirect_stderr(output):
+                    self.assertEqual(main([str(self.recipe)]), 130)
+            finally:
+                os.chdir(prev)
         self.assertIn("Stopped", output.getvalue())
         self.assertIn("Interrupted. Completed figures are retained", output.getvalue())
 
@@ -2516,12 +3337,18 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(" config", output.getvalue())
 
     def test_browser_runs_in_background_by_default_and_can_be_shown(self):
-        for options, shown in (([], False), (["--show-browser"], True)):
-            with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
-                with redirect_stdout(StringIO()):
-                    self.assertEqual(main([str(self.recipe), *options]), 0)
-                self.assertEqual(execute.call_args.args[3], not shown)
-                self.assertEqual(execute.call_args.kwargs["show_browser"], shown)
+        prev = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                for options, shown in (([], False), (["--show-browser"], True)):
+                    with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
+                        with redirect_stdout(StringIO()):
+                            self.assertEqual(main([str(self.recipe), *options]), 0)
+                        self.assertEqual(execute.call_args.args[3], not shown)
+                        self.assertEqual(execute.call_args.kwargs["show_browser"], shown)
+            finally:
+                os.chdir(prev)
 
     def test_plan_lists_42_paths_without_browser_execution(self):
         output = StringIO()
@@ -2534,11 +3361,18 @@ class CliTests(unittest.TestCase):
         self.assertTrue(all(line.startswith("figures/") for line in lines[1:]))
 
     def test_output_directory_defaults_to_figures_and_accepts_override(self):
-        for options, directory in (([], "figures"), (["--output-dir", "custom figures"], "custom figures")):
-            with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
-                with redirect_stdout(StringIO()):
-                    self.assertEqual(main([str(self.recipe), *options]), 0)
-                self.assertEqual(execute.call_args.args[1], Path(directory))
+        prev = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory_tmp:
+            try:
+                os.chdir(directory_tmp)
+                for options, directory in (([], "figures"), (["--output-dir", "custom figures"], "custom figures")):
+                    with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
+                        with redirect_stdout(StringIO()):
+                            self.assertEqual(main([str(self.recipe), *options]), 0)
+                        self.assertEqual(execute.call_args.args[1], Path(directory))
+                        self.assertTrue((Path(directory) / self.recipe.name).is_file())
+            finally:
+                os.chdir(prev)
 
     def test_plan_uses_explicit_output_directory(self):
         output = StringIO()
@@ -2548,14 +3382,85 @@ class CliTests(unittest.TestCase):
         self.assertIn("custom figures/ua_profile/ua_profile_T_rmse_f000.png", output.getvalue().splitlines())
 
     def test_update_flag_forwarded_to_run_plan(self):
-        with patch("automats.cli.run_plan", return_value=0) as execute:
+        prev = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                with patch("automats.cli.run_plan", return_value=0) as execute:
+                    with redirect_stdout(StringIO()):
+                        self.assertEqual(main([str(self.recipe)]), 0)
+                    self.assertFalse(execute.call_args.kwargs["update"])
+                with patch("automats.cli.run_plan", return_value=0) as execute:
+                    with redirect_stdout(StringIO()):
+                        self.assertEqual(main([str(self.recipe), "--update"]), 0)
+                    self.assertTrue(execute.call_args.kwargs["update"])
+            finally:
+                os.chdir(prev)
+
+    def test_cli_and_runners_copy_used_recipe_to_output_dir(self):
+        import yaml
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            src_recipe = root / "my_study.yaml"
+            raw = example()
+            raw["slides"] = [{
+                "plot group": "ua_profile",
+                "title": "Upper Air",
+                "number of rows": 1,
+                "row1": ["T_rmse_f000"],
+            }]
+            src_recipe.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+            # 1. --plan never creates output_dir or copies recipe
+            plan_out = root / "plan_out"
+            with patch("automats.cli.run_plan") as execute, redirect_stdout(StringIO()):
+                self.assertEqual(main([str(src_recipe), "--output-dir", str(plan_out), "--plan"]), 0)
+            execute.assert_not_called()
+            self.assertFalse(plan_out.exists())
+
+            # 2. Normal CLI run copies recipe
+            run_out = root / "run_out"
+            with patch("automats.cli.run_plan", return_value=0), \
+                    patch("automats.cli.build_slides", return_value=run_out / "slides.pptx"), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(main([str(src_recipe), "--output-dir", str(run_out)]), 0)
+            self.assertEqual((run_out / "my_study.yaml").read_text(encoding="utf-8"), src_recipe.read_text(encoding="utf-8"))
+
+            # 3. --metadata-only copies recipe
+            meta_out = root / "meta_out"
+            with patch("automats.cli.run_plan", return_value=0), \
+                    patch("automats.cli.build_slides", return_value=meta_out / "slides.pptx"), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(main([str(src_recipe), "--metadata-only", "--output-dir", str(meta_out)]), 0)
+            self.assertTrue((meta_out / "my_study.yaml").is_file())
+
+            # 4. --slides-only copies recipe (including via direct build_slides API)
+            slides_out = root / "slides_out"
+            plan = load_plan(src_recipe)
+            for job in plan.jobs:
+                fig_path = slides_out / job.relative_path
+                fig_path.parent.mkdir(parents=True, exist_ok=True)
+                fig_path.write_bytes(png_image())
             with redirect_stdout(StringIO()):
-                self.assertEqual(main([str(self.recipe)]), 0)
-            self.assertFalse(execute.call_args.kwargs["update"])
-        with patch("automats.cli.run_plan", return_value=0) as execute:
-            with redirect_stdout(StringIO()):
-                self.assertEqual(main([str(self.recipe), "--update"]), 0)
-            self.assertTrue(execute.call_args.kwargs["update"])
+                self.assertEqual(main([str(src_recipe), "--slides-only", "--output-dir", str(slides_out)]), 0)
+            self.assertTrue((slides_out / "my_study.yaml").is_file())
+            self.assertTrue((slides_out / "slides.pptx").is_file())
+
+            # 5. run_plan early return ("All figures already exist") still copies recipe into output_dir
+            direct_out = root / "direct_run_out"
+            for job in plan.jobs:
+                fig_path = direct_out / job.relative_path
+                fig_path.parent.mkdir(parents=True, exist_ok=True)
+                fig_path.write_bytes(png_image())
+            fake_cache = root / "home_cache"
+            fake_cache.mkdir()
+            with patch("automats.runner.Path.home", return_value=fake_cache), \
+                    patch("playwright.sync_api.sync_playwright") as pw:
+                count = run_plan(plan, direct_out, log=lambda _: None)
+            pw.assert_not_called()
+            self.assertEqual(count, 0)
+            self.assertTrue((direct_out / "my_study.yaml").is_file())
 
     def test_update_rejects_slides_only_and_metadata_only(self):
         for flag in ("--slides-only", "--slide-only", "--metadata-only"):

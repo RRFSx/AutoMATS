@@ -1,11 +1,11 @@
 # Example AutoMATS recipe
 
 experiments:
-- name: RRFSv2_conus_3km_ret_v2x_retv4
+- MATS name: RRFSv2_conus_3km_ret_v2x_retv4
   color: red
-- name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
+- MATS name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
   color: blue
-- name: HRRR_OPS
+- MATS name: HRRR_OPS
   color: orange
 
 automation:

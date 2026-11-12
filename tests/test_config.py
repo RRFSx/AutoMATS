@@ -1,12 +1,16 @@
 from copy import deepcopy
 from pathlib import Path
+import tempfile
 import unittest
+import yaml
 
 from automats.config import (
     ConfigError,
     DEFAULT_DESCRIPTION_FONT_SIZE,
     DEFAULT_LEGEND_FONT_SIZE,
     build_plan,
+    copy_used_recipes,
+    load_plan,
 )
 
 
@@ -747,6 +751,142 @@ class ConfigTests(unittest.TestCase):
         raw["common"].update({"legend font size": 28, "legend_font_size": 28})
         with self.assertRaisesRegex(ConfigError, "legend font size"):
             build_plan(raw)
+
+    def test_experiment_short_name_display_and_fingerprint(self):
+        raw = example()
+        raw["experiments"] = [
+            {"name": "RRFSv2_conus_3km_ret_v2x_retv4", "color": "red", "overlay": True},
+            {"name": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km", "color": "blue", "overlay": True},
+        ]
+        raw["plots"][0]["forecast lead time"] = [0, "0+3"]
+        base_plan = build_plan(raw)
+        base_fps = [job.fingerprint for job in base_plan.jobs]
+
+        for key0, key1 in (("short name", "short_name"), ("short_name", "short name")):
+            with self.subTest(key0=key0, key1=key1):
+                with_short = deepcopy(raw)
+                with_short["experiments"][0][key0] = "base4"
+                with_short["experiments"][1][key1] = "3p5km"
+                plan = build_plan(with_short)
+                self.assertEqual([e.name for e in plan.experiments], [
+                    "RRFSv2_conus_3km_ret_v2x_retv4",
+                    "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+                ])
+                self.assertEqual([e.short_name for e in plan.experiments], ["base4", "3p5km"])
+                self.assertEqual([e.display_name for e in plan.experiments], ["base4", "3p5km"])
+                # Fingerprints and MATS query fields remain unchanged
+                self.assertEqual([job.fingerprint for job in plan.jobs], base_fps)
+                single_job, grouped_job = plan.jobs[0], plan.jobs[1]
+                self.assertEqual([c.name for c in single_job.curves], [
+                    "RRFSv2_conus_3km_ret_v2x_retv4",
+                    "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+                ])
+                self.assertEqual([c.label for c in single_job.curves], [
+                    "RRFSv2conus3kmretv2xretv4",
+                    "RRFSv2conus3kmretv2xretv4p13p5km",
+                ])
+                self.assertEqual([e.name for e in single_job.legend_entries], ["base4", "3p5km"])
+                self.assertEqual([e.name for e in grouped_job.legend_entries], ["base4 f000h", "base4 f003h"])
+
+        # overlay: false keeps path slug derived from canonical exp.name
+        separate = deepcopy(raw)
+        separate["experiments"][0]["overlay"] = False
+        separate["experiments"][0]["short name"] = "base4"
+        sep_plan = build_plan(separate)
+        self.assertTrue(any(
+            job.relative_path.startswith("ua_profile/RRFSv2conus3kmretv2xretv4-1/")
+            for job in sep_plan.jobs
+        ))
+        self.assertFalse(any("base4" in job.relative_path for job in sep_plan.jobs))
+
+        # exclude / include experiment match short_name
+        filtered = deepcopy(raw)
+        filtered["experiments"][0]["short name"] = "base4"
+        filtered["experiments"][1]["short name"] = "3p5km"
+        filtered["plots"][0]["exclude experiment"] = ["base4"]
+        self.assertEqual([e.name for e in build_plan(filtered).jobs[0].experiments], [
+            "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km"
+        ])
+        filtered["plots"][0].pop("exclude experiment")
+        filtered["plots"][0]["include experiment"] = ["3p5km"]
+        self.assertEqual([e.name for e in build_plan(filtered).jobs[0].experiments], [
+            "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km"
+        ])
+
+        # Invalid or conflicting short name spellings fail explicitly
+        bad_conflicting = deepcopy(raw)
+        bad_conflicting["experiments"][0].update({"short name": "b4", "short_name": "base4"})
+        with self.assertRaisesRegex(ConfigError, "short name"):
+            build_plan(bad_conflicting)
+        for bad_val in ("", "   ", "---", 123):
+            bad = deepcopy(raw)
+            bad["experiments"][0]["short name"] = bad_val
+            with self.subTest(bad_val=bad_val), self.assertRaisesRegex(ConfigError, "short name"):
+                build_plan(bad)
+
+    def test_experiment_mats_name_spellings_and_conflicts(self):
+        raw = example()
+        base_fps = [job.fingerprint for job in build_plan(raw).jobs]
+
+        for key0, key1 in (("MATS name", "MATS_name"), ("MATS_name", "name")):
+            with self.subTest(key0=key0, key1=key1):
+                alt = deepcopy(raw)
+                alt["experiments"][0][key0] = alt["experiments"][0].pop("name")
+                alt["experiments"][1][key1] = alt["experiments"][1].pop("name")
+                plan = build_plan(alt)
+                self.assertEqual([e.name for e in plan.experiments], ["RRFSv2x", "RRFSv2b"])
+                self.assertEqual([job.fingerprint for job in plan.jobs], base_fps)
+
+        # Conflicting spellings fail cleanly
+        for k1, k2 in (("MATS name", "name"), ("MATS name", "MATS_name"), ("MATS_name", "name")):
+            bad = deepcopy(raw)
+            bad["experiments"][0][k1] = "expA"
+            bad["experiments"][0][k2] = "expB"
+            with self.subTest(conflict=(k1, k2)), self.assertRaisesRegex(ConfigError, "MATS name"):
+                build_plan(bad)
+
+        # Missing any name key fails explicitly
+        missing = deepcopy(raw)
+        missing["experiments"][0].pop("name")
+        with self.assertRaisesRegex(ConfigError, "MATS name"):
+            build_plan(missing)
+
+    def test_copy_used_recipes_copies_main_and_enabled_graphics_recipe_idempotently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            recipes_dir = root / "recipes"
+            recipes_dir.mkdir(parents=True, exist_ok=True)
+            gfx_recipe = recipes_dir / "gfx_layout.yaml"
+            gfx_text = "graphics:\n  - name: test\n"
+            gfx_recipe.write_text(gfx_text, encoding="utf-8")
+
+            raw = example()
+            raw["pygraf graphics slides"] = {"enable": True, "recipe": "gfx_layout.yaml"}
+            main_recipe = recipes_dir / "study.yaml"
+            main_recipe.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+            out_dir = root / "results" / "run1"
+            plan = load_plan(main_recipe)
+            copied = copy_used_recipes(plan, out_dir)
+            self.assertEqual(copied, (out_dir / "study.yaml", out_dir / "gfx_layout.yaml"))
+            self.assertEqual((out_dir / "study.yaml").read_text(encoding="utf-8"), main_recipe.read_text(encoding="utf-8"))
+            self.assertEqual((out_dir / "gfx_layout.yaml").read_text(encoding="utf-8"), gfx_text)
+
+            # Re-running directly from the copied recipe inside output_dir avoids SameFileError
+            rerun_plan = load_plan(out_dir / "study.yaml")
+            copied_again = copy_used_recipes(rerun_plan, out_dir)
+            self.assertEqual(copied_again, (out_dir / "study.yaml", out_dir / "gfx_layout.yaml"))
+            self.assertEqual((out_dir / "study.yaml").read_text(encoding="utf-8"), main_recipe.read_text(encoding="utf-8"))
+
+            # When pygraf graphics slides are disabled, only the main recipe is copied
+            disabled = example()
+            disabled["pygraf graphics slides"] = {"enable": False, "recipe": "gfx_layout.yaml"}
+            disabled_recipe = recipes_dir / "no_gfx.yaml"
+            disabled_recipe.write_text(yaml.safe_dump(disabled, sort_keys=False), encoding="utf-8")
+            out_dir2 = root / "results" / "run2"
+            copied2 = copy_used_recipes(load_plan(disabled_recipe), out_dir2)
+            self.assertEqual(copied2, (out_dir2 / "no_gfx.yaml",))
+            self.assertFalse((out_dir2 / "gfx_layout.yaml").exists())
 
 
 if __name__ == "__main__":

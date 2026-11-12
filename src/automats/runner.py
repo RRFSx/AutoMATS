@@ -12,10 +12,10 @@ import re
 import shlex
 import time
 
-from automats.config import Plan, PlotJob, Settings, STATISTICS
+from automats.config import Plan, PlotJob, Settings, STATISTICS, copy_used_recipes
 
 
-FIGURE_STYLE_VERSION = 9
+FIGURE_STYLE_VERSION = 11
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PNG_END = b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
 DEFAULT_USER_AGENT = (
@@ -205,6 +205,19 @@ class ResultStore:
                 float(job.description_font_size), float(job.legend_font_size)
             ]:
                 return False
+            expected_labels = [entry.name for entry in job.legend_entries]
+            recorded_labels = record.get("legend_labels")
+            if recorded_labels is None:
+                recorded_exps = record.get("configuration", {}).get("experiments", [])
+                recorded_labels = [
+                    e.get("short_name") or e.get("name")
+                    for e in recorded_exps
+                    if isinstance(e, dict) and e.get("name")
+                ]
+                if len(job.leads) > 1 and len(recorded_labels) == 1:
+                    recorded_labels = [f"{recorded_labels[0]} f{lead:03d}h" for lead in job.leads]
+            if recorded_labels != expected_labels:
+                return False
         if record.get("fingerprint") != job.fingerprint or record.get("base_url") != self.base_url:
             return False
         if effective is not None and record.get("mats", {}).get("effective_settings") != effective:
@@ -223,6 +236,7 @@ class ResultStore:
             "fingerprint": job.fingerprint, "base_url": self.base_url,
             "figure_style_version": FIGURE_STYLE_VERSION,
             "header_style": [job.description_font_size, job.legend_font_size],
+            "legend_labels": [entry.name for entry in job.legend_entries],
             "sha256": sha256(image).hexdigest(), "configuration": asdict(job),
             "mats": metadata,
         }
@@ -316,6 +330,7 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
             stream.write(str(os.getpid()))
         report("Reading previous figure metadata")
         store = ResultStore(output, plan.settings.base_url)
+        copy_used_recipes(plan, output)
         pacer = QueryPacer(plan.settings, state_path=cache / "pacing.json")
         jobs = [job for job in plan.jobs if not metadata_only or
                 (not store.completed(job) and store.completed(job, current_style=False))]

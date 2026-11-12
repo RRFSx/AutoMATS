@@ -163,9 +163,9 @@ def main(argv=None):
 
     # Overwrite experiments for real-time comparison
     data["experiments"] = [
-        {"name": "rrfsv2x", "color": "red"},
-        {"name": "rrfsv2b", "color": "blue"},
-        {"name": "HRRR_OPS", "color": "orange"},
+        {"MATS name": "rrfsv2x", "color": "red"},
+        {"MATS name": "rrfsv2b", "color": "blue"},
+        {"MATS name": "HRRR_OPS", "color": "orange"},
     ]
 
     # Real-time runs should always disable pygraf graphics slides

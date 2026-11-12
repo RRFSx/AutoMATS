@@ -15,7 +15,7 @@ import time
 from automats.config import Plan, PlotJob, Settings, STATISTICS
 
 
-FIGURE_STYLE_VERSION = 9
+FIGURE_STYLE_VERSION = 11
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 PNG_END = b"\x00\x00\x00\x00IEND\xaeB\x60\x82"
 DEFAULT_USER_AGENT = (

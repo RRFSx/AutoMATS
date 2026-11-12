@@ -958,6 +958,78 @@ class MetadataTests(unittest.TestCase):
             "2026-10-01 00:00 - 2026-10-15 00:00, RAOBs (Traditional), "
             "HRRR domain, 1-1000 hPa, T, RMSE"])
 
+        # MATS includes default 'dieoff-type': 'Dieoff' in curveParams across all plot types;
+        # omit 'dieoff-type=Dieoff' everywhere, and ignore dieoff-type outside Dieoff plots.
+        date_range = {"start": "2024-05-06T10:00:00+00:00", "end": "2024-05-13T00:00:00+00:00"}
+        tseries_effective = {
+            "plot_type": "TimeSeries",
+            "date_range": date_range,
+            "curves": [{
+                "truth": "METAR",
+                "region": "All HRRR domain",
+                "variable": "Temperature at 2m (°C)",
+                "statistic": "RMSE",
+                "dieoff-type": "Dieoff",
+            }],
+        }
+        self.assertEqual(figure_header(job, tseries_effective), [
+            "2024-05-06 10:00 - 2024-05-13 00:00, TimeSeries, f000h, METAR, "
+            "All HRRR domain, Temperature at 2m (°C), RMSE"])
+        tseries_valid_time = deepcopy(tseries_effective)
+        tseries_valid_time["curves"][0]["dieoff-type"] = "Valid time"
+        self.assertEqual(figure_header(job, tseries_valid_time), figure_header(job, tseries_effective))
+
+        profile_effective = {
+            "plot_type": "Profile",
+            "date_range": date_range,
+            "curves": [{
+                "truth": "RAOBs (Traditional)",
+                "region": "HRRR domain",
+                "variable": "Temperature",
+                "statistic": "RMSE",
+                "dieoff-type": "Dieoff",
+                "top": "1",
+                "bottom": "1000",
+                "averaging": "None",
+            }],
+        }
+        self.assertEqual(figure_header(job, profile_effective), [
+            "2024-05-06 10:00 - 2024-05-13 00:00, Profile, f000h, RAOBs (Traditional), "
+            "HRRR domain, Temperature, RMSE, top=1, bottom=1000, averaging=None"])
+
+        dieoff_job = replace(job, lead=None)
+        for default_value in ("Dieoff", "dieoff", None):
+            dieoff_default = {
+                "plot_type": "Dieoff",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Temperature at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": default_value,
+                }],
+            }
+            self.assertEqual(figure_header(dieoff_job, dieoff_default), [
+                "2024-05-06 10:00 - 2024-05-13 00:00, Dieoff, METAR, "
+                "All HRRR domain, Temperature at 2m (°C), RMSE"])
+
+        for valid_time_value in ("Valid time", "Valid Time", "valid_time"):
+            dieoff_non_default = {
+                "plot_type": "Dieoff",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Temperature at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": valid_time_value,
+                }],
+            }
+            self.assertEqual(figure_header(dieoff_job, dieoff_non_default), [
+                "2024-05-06 10:00 - 2024-05-13 00:00, Dieoff, METAR, "
+                "All HRRR domain, Temperature at 2m (°C), RMSE, Valid Time"])
+
     def test_header_is_rendered_above_the_image_without_network(self):
         try:
             from playwright.sync_api import sync_playwright
@@ -1108,9 +1180,25 @@ class MetadataTests(unittest.TestCase):
                     ]
                 }
                 diff_annotated, diff_meta = annotate_image(page, diff_job, bytes(image), plot_params=plot_params)
-                self.assertEqual(diff_meta["legend_rows"], 2)
+                self.assertEqual(diff_meta["legend_rows"], 1)
                 self.assertEqual(diff_meta["legend_names"], ["RRFSv2x", "RRFSv2b", "RRFSv2b - RRFSv2x"])
                 self.assertEqual(diff_meta["diff_legend_names"], ["RRFSv2b - RRFSv2x"])
+
+                # Difference legend items still wrap onto a second line only when the row exceeds available width.
+                crowded_diff_exps = (
+                    replace(job.experiments[0], name="RRFSv2_conus_3km_long_baseline_name"),
+                    replace(job.experiments[1], name="RRFSv2_conus_3km_long_experiment_name"),
+                )
+                crowded_diff_job = replace(diff_job, experiments=crowded_diff_exps)
+                crowded_diff_params = {
+                    "curves": [
+                        {"data-source": crowded_diff_exps[0].name, "label": "exp1", "color": "rgb(255,0,0)", "diffFrom": None},
+                        {"data-source": crowded_diff_exps[1].name, "label": "exp2", "color": "rgb(0,0,255)", "diffFrom": None},
+                        {"data-source": crowded_diff_exps[1].name, "label": "diff", "color": "rgb(255,165,0)", "diffFrom": [1, 0]},
+                    ]
+                }
+                _, crowded_diff_meta = annotate_image(page, crowded_diff_job, bytes(image), plot_params=crowded_diff_params)
+                self.assertGreaterEqual(crowded_diff_meta["legend_rows"], 2)
             finally:
                 browser.close()
 
@@ -1204,6 +1292,8 @@ class MetadataTests(unittest.TestCase):
                 wrapped_img, wrapped_meta = annotate_image(
                     page, replace(job, statistic="rmse+bias"), portrait, effective_settings=effective,
                 )
+                self.assertNotIn("dieoff-type", wrapped_meta["header"][0])
+                self.assertIn("top=1, bottom=1000, averaging=None", wrapped_meta["header"][0])
                 self.assertGreater(wrapped_meta["header_height"], 110)
                 # Row 1 ends cleanly before "averaging=None" (width ~177px) wraps to row 2 rather than splitting mid-word.
                 line_metrics = page.evaluate("""async ({image, descPx}) => {
@@ -1359,10 +1449,12 @@ class MetadataTests(unittest.TestCase):
                     ]
                 }
                 _, meta_diff_params = annotate_image(page, diff_job, chart, plot_params=plot_params)
+                self.assertEqual(meta_diff_params["legend_rows"], 1)
                 self.assertEqual(meta_diff_params["legend_names"], ["base4", "3p5km", "3p5km - base4"])
                 self.assertEqual(meta_diff_params["diff_legend_names"], ["3p5km - base4"])
 
                 _, meta_diff_fallback = annotate_image(page, diff_job, chart)
+                self.assertEqual(meta_diff_fallback["legend_rows"], 1)
                 self.assertEqual(meta_diff_fallback["legend_names"], ["base4", "3p5km", "3p5km - base4"])
 
                 # 2. Cached figure rendered previously with long names transitions cleanly via --metadata-only
@@ -1412,6 +1504,125 @@ class MetadataTests(unittest.TestCase):
                 ResultStore(figures, plan_renamed.settings.base_url).state["results"][job_short.relative_path]["legend_labels"],
                 ["base4", "exp3p5"],
             )
+
+    def test_dieoff_type_suppression_refreshes_cached_v9_figures_via_metadata_only(self):
+        try:
+            from io import BytesIO
+            from PIL import Image
+            from playwright.sync_api import sync_playwright  # noqa: F401
+        except ImportError:
+            self.skipTest("Playwright or Pillow is not installed")
+
+        raw = example()
+        raw["plots"] = [
+            {
+                "name": "sfc_tseries", "application": "surface", "truth": "METAR",
+                "plot_type": "time series", "region": "All HRRR domain",
+                "variable": ["t2m"], "statistic": ["rmse"], "forecast lead time": [0],
+            },
+            {
+                "name": "sfc_dieoff", "application": "surface", "truth": "METAR",
+                "plot_type": "dieoff", "region": "All HRRR domain",
+                "variable": ["t2m"], "statistic": ["rmse"],
+            },
+            {
+                "name": "sfc_valid_time", "application": "surface", "truth": "METAR",
+                "plot_type": "dieoff", "region": "All HRRR domain",
+                "variable": ["td2m"], "statistic": ["rmse"],
+                "Difference curves": "Diff all curves against the 1st added curve",
+            },
+        ]
+        plan = build_plan(raw)
+        tseries_job, dieoff_job, valid_time_diff_job = plan.jobs
+        self.assertGreaterEqual(FIGURE_STYLE_VERSION, 11)
+
+        v9_canvas = Image.new("RGB", (1200, 360), "green")
+        v9_canvas.paste(Image.new("RGB", (1200, 60), "white"), (0, 0))
+        buf = BytesIO()
+        v9_canvas.save(buf, format="PNG")
+        v9_bytes = buf.getvalue()
+
+        date_range = {"start": "2024-05-06T10:00:00+00:00", "end": "2024-05-13T00:00:00+00:00"}
+        effective_by_path = {
+            tseries_job.relative_path: {
+                "plot_type": "TimeSeries",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Temperature at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": "Dieoff",
+                }],
+            },
+            dieoff_job.relative_path: {
+                "plot_type": "Dieoff",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Temperature at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": "Dieoff",
+                }],
+            },
+            valid_time_diff_job.relative_path: {
+                "plot_type": "Dieoff",
+                "date_range": date_range,
+                "curves": [{
+                    "truth": "METAR",
+                    "region": "All HRRR domain",
+                    "variable": "Dewpoint at 2m (°C)",
+                    "statistic": "RMSE",
+                    "dieoff-type": "Valid time",
+                }],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            figures = root / "figures"
+            store = ResultStore(figures, plan.settings.base_url)
+            for job, version in ((tseries_job, 9), (dieoff_job, 9), (valid_time_diff_job, 10)):
+                store.save(job, v9_bytes, {
+                    "effective_settings": effective_by_path[job.relative_path],
+                    "figure": {
+                        "width": 1200,
+                        "height": 360,
+                        "header_height": 60,
+                        "legend_in_header": True,
+                        "header": [
+                            "2024-05-06 10:00 - 2024-05-13 00:00, "
+                            f"{effective_by_path[job.relative_path]['plot_type']}, "
+                            "METAR, All HRRR domain, Variable, RMSE, dieoff-type=Dieoff"
+                        ],
+                    },
+                })
+                store.state["results"][job.relative_path]["figure_style_version"] = version
+            store.flush()
+
+            for job in plan.jobs:
+                self.assertFalse(store.completed(job))
+                self.assertTrue(store.completed(job, current_style=False))
+
+            with patch("automats.runner.Path.home", return_value=root), redirect_stdout(StringIO()):
+                self.assertEqual(run_plan(plan, figures, metadata_only=True), 3)
+                self.assertEqual(run_plan(plan, figures, metadata_only=True), 0)
+
+            refreshed_store = ResultStore(figures, plan.settings.base_url)
+            for job in plan.jobs:
+                self.assertTrue(refreshed_store.completed(job))
+                record = refreshed_store.state["results"][job.relative_path]
+                self.assertEqual(record["figure_style_version"], FIGURE_STYLE_VERSION)
+                fig_meta = record["mats"]["figure"]
+                self.assertNotIn("dieoff-type", fig_meta["header"][0])
+                self.assertEqual(fig_meta["height"] - fig_meta["header_height"], 300)
+                with Image.open(BytesIO((figures / job.relative_path).read_bytes())) as refreshed_img:
+                    self.assertEqual(refreshed_img.size[1] - fig_meta["header_height"], 300)
+            valid_time_meta = refreshed_store.state["results"][valid_time_diff_job.relative_path]["mats"]["figure"]
+            self.assertEqual(valid_time_meta["legend_rows"], 1)
+            self.assertEqual(valid_time_meta["diff_legend_names"], ["RRFSv2b - RRFSv2x"])
+            self.assertTrue(valid_time_meta["header"][0].endswith(", Valid Time"))
 
 
 class ControlPacingTests(unittest.TestCase):

@@ -85,7 +85,11 @@ def figure_header(job: PlotJob, effective: dict | None = None) -> list[str]:
             fields[-1] = "RMSE (solid) + BIAS (dashed)"
         if job.lead is not None:
             fields.insert(2, job.lead_tag + "h")
-        for parameter in ("dieoff-type", "top", "bottom", "averaging"):
+        plot_type = str(effective.get("plot_type") or "").strip()
+        dieoff_type = str(curve.get("dieoff-type") or "").strip()
+        if plot_type.casefold() == "dieoff" and dieoff_type and dieoff_type.casefold() != "dieoff":
+            fields.append("Valid Time" if dieoff_type.casefold().replace("_", " ") == "valid time" else dieoff_type)
+        for parameter in ("top", "bottom", "averaging"):
             if parameter in curve:
                 fields.append(f"{parameter}={curve[parameter]}")
         return [", ".join(str(field) for field in fields if field != "")]
@@ -206,18 +210,11 @@ ANNOTATE_IMAGE = r"""async ({image, header, experiments, diffExperiments=[], sou
         return {placed, height: totalH || legLineHeight, rows: rowCount};
     };
 
-    const primaryLayout = layoutGroup(experiments, 0);
-    let totalLegendHeight = primaryLayout.height;
-    let totalRows = primaryLayout.rows;
-    let allPlaced = [...primaryLayout.placed];
-
-    if (diffExperiments && diffExperiments.length > 0) {
-        const diffGap = Math.max(4, Math.round(legPx * 0.2));
-        const diffLayout = layoutGroup(diffExperiments, primaryLayout.height + diffGap);
-        totalLegendHeight = primaryLayout.height + diffGap + diffLayout.height;
-        totalRows += diffLayout.rows;
-        allPlaced.push(...diffLayout.placed);
-    }
+    const legendItems = [...experiments, ...(diffExperiments || [])];
+    const legendLayout = layoutGroup(legendItems, 0);
+    const totalLegendHeight = legendLayout.height;
+    const totalRows = legendLayout.rows;
+    const allPlaced = legendLayout.placed;
 
     const topPad = Math.max(4, Math.round(descPx * 0.25));
     const sectionGap = Math.max(4, Math.round(Math.max(descPx, legPx) * 0.2));

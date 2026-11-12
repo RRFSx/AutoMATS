@@ -12,7 +12,7 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
-from automats.config import Plan, PlotJob
+from automats.config import Plan, PlotJob, copy_used_recipes
 
 
 class SlideError(ValueError):
@@ -1714,4 +1714,5 @@ def build_slides(
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+    copy_used_recipes(plan, output)
     return destination

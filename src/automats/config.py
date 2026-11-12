@@ -8,8 +8,11 @@ from hashlib import sha256
 from itertools import product
 import json
 import math
+import os
 from pathlib import Path
 import re
+import shutil
+import tempfile
 from typing import Any
 
 try:
@@ -697,3 +700,50 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
         recipe_path=recipe_path,
         title=recipe_title,
     )
+
+
+def _atomic_copy_file(source: Path, destination: Path) -> bool:
+    if not source.is_file():
+        return False
+    if source.resolve() == destination.resolve():
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent,
+            prefix=f".{destination.name}-",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return True
+
+
+def copy_used_recipes(plan: Plan, output_dir: Path, recipe_path: Path | None = None) -> tuple[Path, ...]:
+    """Copy the active recipe (and enabled pygraf graphics recipe) into output_dir for reference."""
+    main_recipe = recipe_path if recipe_path is not None else plan.recipe_path
+    if main_recipe is None or not main_recipe.is_file():
+        return ()
+
+    copied: list[Path] = []
+    main_dst = output_dir / main_recipe.name
+    _atomic_copy_file(main_recipe, main_dst)
+    copied.append(main_dst)
+
+    if plan.pygraf_graphics and plan.pygraf_graphics.enable and plan.pygraf_graphics.recipe:
+        from automats.graphics import resolve_graphics_recipe_path
+
+        gfx_recipe = resolve_graphics_recipe_path(plan.pygraf_graphics.recipe, main_recipe)
+        if gfx_recipe is not None and gfx_recipe.is_file():
+            gfx_dst = output_dir / gfx_recipe.name
+            if gfx_dst.resolve() != main_dst.resolve():
+                _atomic_copy_file(gfx_recipe, gfx_dst)
+                copied.append(gfx_dst)
+
+    return tuple(copied)

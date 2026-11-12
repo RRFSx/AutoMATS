@@ -1138,6 +1138,7 @@ class BaselineC6Tests(unittest.TestCase):
             expected_saved_slides = f"Saved slides to {out_dir.resolve() / 'slides.pptx'}"
 
             self.assertEqual(rc2, 0)
+            self.assertTrue((out_dir / "baseline_c6_brand_new_exp.yaml").is_file())
             meta_lines = [line for line in combined_meta.getvalue().splitlines() if line.strip()]
             self.assertEqual(meta_lines[-2], expected_warning)
             self.assertEqual(meta_lines[-1], expected_saved_slides)

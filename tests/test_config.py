@@ -1,12 +1,16 @@
 from copy import deepcopy
 from pathlib import Path
+import tempfile
 import unittest
+import yaml
 
 from automats.config import (
     ConfigError,
     DEFAULT_DESCRIPTION_FONT_SIZE,
     DEFAULT_LEGEND_FONT_SIZE,
     build_plan,
+    copy_used_recipes,
+    load_plan,
 )
 
 
@@ -819,6 +823,43 @@ class ConfigTests(unittest.TestCase):
             bad["experiments"][0]["short name"] = bad_val
             with self.subTest(bad_val=bad_val), self.assertRaisesRegex(ConfigError, "short name"):
                 build_plan(bad)
+
+    def test_copy_used_recipes_copies_main_and_enabled_graphics_recipe_idempotently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            recipes_dir = root / "recipes"
+            recipes_dir.mkdir(parents=True, exist_ok=True)
+            gfx_recipe = recipes_dir / "gfx_layout.yaml"
+            gfx_text = "graphics:\n  - name: test\n"
+            gfx_recipe.write_text(gfx_text, encoding="utf-8")
+
+            raw = example()
+            raw["pygraf graphics slides"] = {"enable": True, "recipe": "gfx_layout.yaml"}
+            main_recipe = recipes_dir / "study.yaml"
+            main_recipe.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+            out_dir = root / "results" / "run1"
+            plan = load_plan(main_recipe)
+            copied = copy_used_recipes(plan, out_dir)
+            self.assertEqual(copied, (out_dir / "study.yaml", out_dir / "gfx_layout.yaml"))
+            self.assertEqual((out_dir / "study.yaml").read_text(encoding="utf-8"), main_recipe.read_text(encoding="utf-8"))
+            self.assertEqual((out_dir / "gfx_layout.yaml").read_text(encoding="utf-8"), gfx_text)
+
+            # Re-running directly from the copied recipe inside output_dir avoids SameFileError
+            rerun_plan = load_plan(out_dir / "study.yaml")
+            copied_again = copy_used_recipes(rerun_plan, out_dir)
+            self.assertEqual(copied_again, (out_dir / "study.yaml", out_dir / "gfx_layout.yaml"))
+            self.assertEqual((out_dir / "study.yaml").read_text(encoding="utf-8"), main_recipe.read_text(encoding="utf-8"))
+
+            # When pygraf graphics slides are disabled, only the main recipe is copied
+            disabled = example()
+            disabled["pygraf graphics slides"] = {"enable": False, "recipe": "gfx_layout.yaml"}
+            disabled_recipe = recipes_dir / "no_gfx.yaml"
+            disabled_recipe.write_text(yaml.safe_dump(disabled, sort_keys=False), encoding="utf-8")
+            out_dir2 = root / "results" / "run2"
+            copied2 = copy_used_recipes(load_plan(disabled_recipe), out_dir2)
+            self.assertEqual(copied2, (out_dir2 / "no_gfx.yaml",))
+            self.assertFalse((out_dir2 / "gfx_layout.yaml").exists())
 
 
 if __name__ == "__main__":

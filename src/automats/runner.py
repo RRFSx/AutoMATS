@@ -12,7 +12,7 @@ import re
 import shlex
 import time
 
-from automats.config import Plan, PlotJob, Settings, STATISTICS
+from automats.config import Plan, PlotJob, Settings, STATISTICS, copy_used_recipes
 
 
 FIGURE_STYLE_VERSION = 11
@@ -330,6 +330,7 @@ def run_plan(plan: Plan, output: Path, limit: int | None = None, headless: bool 
             stream.write(str(os.getpid()))
         report("Reading previous figure metadata")
         store = ResultStore(output, plan.settings.base_url)
+        copy_used_recipes(plan, output)
         pacer = QueryPacer(plan.settings, state_path=cache / "pacing.json")
         jobs = [job for job in plan.jobs if not metadata_only or
                 (not store.completed(job) and store.completed(job, current_style=False))]

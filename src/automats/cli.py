@@ -11,7 +11,7 @@ import sys
 from threading import Event, Lock, Thread
 import time
 
-from automats.config import load_plan
+from automats.config import copy_used_recipes, load_plan
 from automats.runner import figure_exists, run_plan
 from automats.slides import build_slides
 
@@ -154,6 +154,7 @@ def main(argv=None, *, pre_slides_warnings: Iterable[str] | None = None) -> int:
                 missing=missing_figures,
                 graphics_stats=graphics_stats,
             )
+            copy_used_recipes(plan, args.output_dir, args.recipe)
             if plan.pygraf_graphics and plan.pygraf_graphics.enable:
                 print(
                     f"Saved {graphics_stats['saved']} graphics under {(args.output_dir / 'graphics').resolve()}",
@@ -179,6 +180,7 @@ def main(argv=None, *, pre_slides_warnings: Iterable[str] | None = None) -> int:
                      metadata_only=args.metadata_only, show_browser=args.show_browser,
                      update=args.update,
                      log=progress.log, status=progress.update, failures=failed_plots)
+            copy_used_recipes(plan, args.output_dir, args.recipe)
             if plan.slides or (plan.pygraf_graphics and plan.pygraf_graphics.enable) or plan.slide_error is not None:
                 if not args.metadata_only and args.limit is not None and args.limit < len(plan.jobs):
                     progress.log("Slides skipped for a partial --limit run; use --slides-only to build from existing PNGs")

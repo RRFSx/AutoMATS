@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import struct
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -12,7 +13,7 @@ import unittest
 import zlib
 from unittest.mock import Mock, patch
 
-from automats.config import Settings, STATISTICS, build_plan
+from automats.config import Settings, STATISTICS, build_plan, load_plan
 from automats.browser import EXPORT_IMAGE, Throttled, UpperAirBrowser, annotate_image, discover_applications, figure_header, minimize_window, resolve_application, retry_after_seconds
 from automats.cli import ProgressDisplay, main
 from automats.runner import CHROMIUM_ARGS, CHROMIUM_IGNORE_DEFAULT_ARGS, DEFAULT_USER_AGENT, FIGURE_STYLE_VERSION, FatalRunError, PNG_SIGNATURE, QueryPacer, ResolutionError, ResultStore, RunError, figure_exists, is_png, lock_error, resolve_option, run_plan, validate_curves, validate_effective_curves
@@ -3312,9 +3313,15 @@ class CliTests(unittest.TestCase):
 
     def test_ctrl_c_returns_130_and_stops_progress_display(self):
         output = StringIO()
-        with patch("automats.cli.run_plan", side_effect=KeyboardInterrupt), \
-            redirect_stdout(output), redirect_stderr(output):
-            self.assertEqual(main([str(self.recipe)]), 130)
+        prev = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                with patch("automats.cli.run_plan", side_effect=KeyboardInterrupt), \
+                    redirect_stdout(output), redirect_stderr(output):
+                    self.assertEqual(main([str(self.recipe)]), 130)
+            finally:
+                os.chdir(prev)
         self.assertIn("Stopped", output.getvalue())
         self.assertIn("Interrupted. Completed figures are retained", output.getvalue())
 
@@ -3330,12 +3337,18 @@ class CliTests(unittest.TestCase):
         self.assertNotIn(" config", output.getvalue())
 
     def test_browser_runs_in_background_by_default_and_can_be_shown(self):
-        for options, shown in (([], False), (["--show-browser"], True)):
-            with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
-                with redirect_stdout(StringIO()):
-                    self.assertEqual(main([str(self.recipe), *options]), 0)
-                self.assertEqual(execute.call_args.args[3], not shown)
-                self.assertEqual(execute.call_args.kwargs["show_browser"], shown)
+        prev = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                for options, shown in (([], False), (["--show-browser"], True)):
+                    with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
+                        with redirect_stdout(StringIO()):
+                            self.assertEqual(main([str(self.recipe), *options]), 0)
+                        self.assertEqual(execute.call_args.args[3], not shown)
+                        self.assertEqual(execute.call_args.kwargs["show_browser"], shown)
+            finally:
+                os.chdir(prev)
 
     def test_plan_lists_42_paths_without_browser_execution(self):
         output = StringIO()
@@ -3348,11 +3361,18 @@ class CliTests(unittest.TestCase):
         self.assertTrue(all(line.startswith("figures/") for line in lines[1:]))
 
     def test_output_directory_defaults_to_figures_and_accepts_override(self):
-        for options, directory in (([], "figures"), (["--output-dir", "custom figures"], "custom figures")):
-            with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
-                with redirect_stdout(StringIO()):
-                    self.assertEqual(main([str(self.recipe), *options]), 0)
-                self.assertEqual(execute.call_args.args[1], Path(directory))
+        prev = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory_tmp:
+            try:
+                os.chdir(directory_tmp)
+                for options, directory in (([], "figures"), (["--output-dir", "custom figures"], "custom figures")):
+                    with self.subTest(options=options), patch("automats.cli.run_plan", return_value=0) as execute:
+                        with redirect_stdout(StringIO()):
+                            self.assertEqual(main([str(self.recipe), *options]), 0)
+                        self.assertEqual(execute.call_args.args[1], Path(directory))
+                        self.assertTrue((Path(directory) / self.recipe.name).is_file())
+            finally:
+                os.chdir(prev)
 
     def test_plan_uses_explicit_output_directory(self):
         output = StringIO()
@@ -3362,14 +3382,85 @@ class CliTests(unittest.TestCase):
         self.assertIn("custom figures/ua_profile/ua_profile_T_rmse_f000.png", output.getvalue().splitlines())
 
     def test_update_flag_forwarded_to_run_plan(self):
-        with patch("automats.cli.run_plan", return_value=0) as execute:
+        prev = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                with patch("automats.cli.run_plan", return_value=0) as execute:
+                    with redirect_stdout(StringIO()):
+                        self.assertEqual(main([str(self.recipe)]), 0)
+                    self.assertFalse(execute.call_args.kwargs["update"])
+                with patch("automats.cli.run_plan", return_value=0) as execute:
+                    with redirect_stdout(StringIO()):
+                        self.assertEqual(main([str(self.recipe), "--update"]), 0)
+                    self.assertTrue(execute.call_args.kwargs["update"])
+            finally:
+                os.chdir(prev)
+
+    def test_cli_and_runners_copy_used_recipe_to_output_dir(self):
+        import yaml
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            src_recipe = root / "my_study.yaml"
+            raw = example()
+            raw["slides"] = [{
+                "plot group": "ua_profile",
+                "title": "Upper Air",
+                "number of rows": 1,
+                "row1": ["T_rmse_f000"],
+            }]
+            src_recipe.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+            # 1. --plan never creates output_dir or copies recipe
+            plan_out = root / "plan_out"
+            with patch("automats.cli.run_plan") as execute, redirect_stdout(StringIO()):
+                self.assertEqual(main([str(src_recipe), "--output-dir", str(plan_out), "--plan"]), 0)
+            execute.assert_not_called()
+            self.assertFalse(plan_out.exists())
+
+            # 2. Normal CLI run copies recipe
+            run_out = root / "run_out"
+            with patch("automats.cli.run_plan", return_value=0), \
+                    patch("automats.cli.build_slides", return_value=run_out / "slides.pptx"), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(main([str(src_recipe), "--output-dir", str(run_out)]), 0)
+            self.assertEqual((run_out / "my_study.yaml").read_text(encoding="utf-8"), src_recipe.read_text(encoding="utf-8"))
+
+            # 3. --metadata-only copies recipe
+            meta_out = root / "meta_out"
+            with patch("automats.cli.run_plan", return_value=0), \
+                    patch("automats.cli.build_slides", return_value=meta_out / "slides.pptx"), \
+                    redirect_stdout(StringIO()):
+                self.assertEqual(main([str(src_recipe), "--metadata-only", "--output-dir", str(meta_out)]), 0)
+            self.assertTrue((meta_out / "my_study.yaml").is_file())
+
+            # 4. --slides-only copies recipe (including via direct build_slides API)
+            slides_out = root / "slides_out"
+            plan = load_plan(src_recipe)
+            for job in plan.jobs:
+                fig_path = slides_out / job.relative_path
+                fig_path.parent.mkdir(parents=True, exist_ok=True)
+                fig_path.write_bytes(png_image())
             with redirect_stdout(StringIO()):
-                self.assertEqual(main([str(self.recipe)]), 0)
-            self.assertFalse(execute.call_args.kwargs["update"])
-        with patch("automats.cli.run_plan", return_value=0) as execute:
-            with redirect_stdout(StringIO()):
-                self.assertEqual(main([str(self.recipe), "--update"]), 0)
-            self.assertTrue(execute.call_args.kwargs["update"])
+                self.assertEqual(main([str(src_recipe), "--slides-only", "--output-dir", str(slides_out)]), 0)
+            self.assertTrue((slides_out / "my_study.yaml").is_file())
+            self.assertTrue((slides_out / "slides.pptx").is_file())
+
+            # 5. run_plan early return ("All figures already exist") still copies recipe into output_dir
+            direct_out = root / "direct_run_out"
+            for job in plan.jobs:
+                fig_path = direct_out / job.relative_path
+                fig_path.parent.mkdir(parents=True, exist_ok=True)
+                fig_path.write_bytes(png_image())
+            fake_cache = root / "home_cache"
+            fake_cache.mkdir()
+            with patch("automats.runner.Path.home", return_value=fake_cache), \
+                    patch("playwright.sync_api.sync_playwright") as pw:
+                count = run_plan(plan, direct_out, log=lambda _: None)
+            pw.assert_not_called()
+            self.assertEqual(count, 0)
+            self.assertTrue((direct_out / "my_study.yaml").is_file())
 
     def test_update_rejects_slides_only_and_metadata_only(self):
         for flag in ("--slides-only", "--slide-only", "--metadata-only"):

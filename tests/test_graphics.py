@@ -60,8 +60,8 @@ class GraphicsTests(unittest.TestCase):
 
     def test_ordinals_and_experiment_resolution(self):
         exps = (
-            Experiment(name="exp_one", color="red"),
-            Experiment(name="exp_two", color="blue"),
+            Experiment(name="exp_one", color="red", short_name="base4"),
+            Experiment(name="exp_two", color="blue", short_name="3p5km"),
             Experiment(name="exp_three", color="green"),
         )
         self.assertEqual(resolve_experiment("first", exps), exps[0])
@@ -69,6 +69,87 @@ class GraphicsTests(unittest.TestCase):
         self.assertEqual(resolve_experiment("third", exps), exps[2])
         self.assertIsNone(resolve_experiment("fourth", exps))
         self.assertEqual(resolve_experiment("exp_one", exps), exps[0])
+        self.assertEqual(resolve_experiment("base4", exps), exps[0])
+        self.assertEqual(resolve_experiment("3P5KM", exps), exps[1])
+
+    def test_process_graphics_slides_uses_short_name_captions_and_preserves_cache_dir(self):
+        from io import BytesIO
+        from unittest.mock import patch
+        from PIL import Image
+        from pptx import Presentation
+        from automats.graphics import process_graphics_slides
+
+        png_buf = BytesIO()
+        Image.new("RGB", (60, 40), color="navy").save(png_buf, format="PNG")
+        valid_png = png_buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gfx_recipe = tmp / "graphics_layout.yaml"
+            gfx_recipe.write_text(
+                "graphics slides:\n"
+                "- type: same valid time\n"
+                "  title: Reflectivity\n"
+                "  cycle: 2024050612\n"
+                "  graphics name: cref_full_sfc_f006.png\n"
+                "  number of rows: 1\n"
+                "  row1: [first, second]\n"
+                "- type: same cycle\n"
+                "  title: Reflectivity\n"
+                "  experiment: second\n"
+                "  cycle: 2024050612\n"
+                "  number of rows: 1\n"
+                "  row1: [cref_full_sfc_f006.png]\n",
+                encoding="utf-8",
+            )
+            plan = build_plan({
+                "common": {"start": "2024-05-06T00:00:00Z", "end": "2024-05-07T00:00:00Z"},
+                "experiments": [
+                    {
+                        "name": "RRFSv2_conus_3km_ret_v2x_retv4",
+                        "short name": "base4",
+                        "color": "red",
+                        "COMROOT": "gaeac6:/gpfs/exp1/com/rrfs/v2",
+                    },
+                    {
+                        "name": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+                        "short name": "3p5km",
+                        "color": "blue",
+                        "COMROOT": "gaeac6:/gpfs/exp2/com/rrfs/v2",
+                    },
+                ],
+                "plots": [
+                    {
+                        "name": "sfc_tseries",
+                        "application": "surface",
+                        "plot_type": "time series",
+                        "variable": ["t2m"],
+                        "statistic": ["rmse"],
+                    }
+                ],
+                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+            })
+
+            # Cache paths must continue using full canonical exp.name directories
+            for exp_name in (
+                "RRFSv2_conus_3km_ret_v2x_retv4",
+                "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+            ):
+                p = tmp / "graphics" / exp_name / "2024050612_006_cref_full_sfc_f006.png"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(valid_png)
+
+            deck = Presentation()
+            with patch("automats.graphics.test_hpc_session_ready", return_value=True):
+                added = process_graphics_slides(plan, tmp, deck)
+
+            self.assertEqual(added, 2)
+            slide1_texts = [s.text for s in deck.slides[0].shapes if s.has_text_frame]
+            slide2_texts = [s.text for s in deck.slides[1].shapes if s.has_text_frame]
+            self.assertIn("base4", slide1_texts)
+            self.assertIn("3p5km", slide1_texts)
+            self.assertTrue(any("3p5km" in t and "Cycle: 2024050612" in t for t in slide2_texts))
+            self.assertFalse(any("RRFSv2_conus_3km" in t for t in slide1_texts + slide2_texts))
 
     def test_parse_graphics_name(self):
         # Standard .png
@@ -846,6 +927,7 @@ class BaselineC6Tests(unittest.TestCase):
             ):
                 rc = baselinec6.main([
                     "my_mats_exp",
+                    "my_short",
                     "/gpfs/f6/bil-fire10-oar/scratch/me/com/rrfs/v2.1.4/",
                     "--slides-only",
                 ])
@@ -862,11 +944,13 @@ class BaselineC6Tests(unittest.TestCase):
             data = yaml.safe_load(tmp_recipe.read_text(encoding="utf-8"))
             self.assertEqual(len(data["experiments"]), 2)
             self.assertEqual(data["experiments"][0]["name"], "RRFSv2_conus_3km_ret_v2x_retv4")
+            self.assertEqual(data["experiments"][0]["short name"], baselinec6.BASELINE_SHORT_NAME)
             self.assertEqual(
                 data["experiments"][0]["COMROOT"],
                 "gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4",
             )
             self.assertEqual(data["experiments"][1]["name"], "my_mats_exp")
+            self.assertEqual(data["experiments"][1]["short name"], "my_short")
             self.assertEqual(data["experiments"][1]["color"], "blue")
             self.assertEqual(
                 data["experiments"][1]["COMROOT"],
@@ -900,6 +984,7 @@ class BaselineC6Tests(unittest.TestCase):
                     "--output-dir", str(root / "custom_out"),
                     "--limit", "2",
                     "my_f7_exp",
+                    "my_f7_short",
                     "/gpfs/f7/bil-fire10-oar/scratch/me/com/rrfs/v2.1.4",
                 ])
 
@@ -908,6 +993,7 @@ class BaselineC6Tests(unittest.TestCase):
             tmp_recipe = Path(captured["args"][0])
             data = yaml.safe_load(tmp_recipe.read_text(encoding="utf-8"))
             self.assertEqual(data["experiments"][1]["name"], "my_f7_exp")
+            self.assertEqual(data["experiments"][1]["short name"], "my_f7_short")
             self.assertEqual(
                 data["experiments"][1]["COMROOT"],
                 "gaeac7:/gpfs/f7/bil-fire10-oar/scratch/me/com/rrfs/v2.1.4",
@@ -917,7 +1003,7 @@ class BaselineC6Tests(unittest.TestCase):
                 ["--output-dir", str(root / "custom_out"), "--limit", "2"],
             )
 
-            # Flag form --hpc-dir / --comroot also resolves /gpfs/f6 and /gpfs/f7
+            # Flag form --expname / --short-name / --hpc-dir also resolves /gpfs/f6 and /gpfs/f7
             stderr_buf2 = io.StringIO()
             with (
                 patch.object(baselinec6, "ROOT", root),
@@ -926,12 +1012,14 @@ class BaselineC6Tests(unittest.TestCase):
             ):
                 rc2 = baselinec6.main([
                     "--expname", "existing_other",
+                    "--short-name", "other_s",
                     "--hpc-dir", "/gpfs/f7/new_dir/com/rrfs/v2.1.4",
                 ])
 
             self.assertEqual(rc2, 0)
             self.assertEqual(stderr_buf2.getvalue(), "")
             data2 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
+            self.assertEqual(data2["experiments"][1]["short name"], "other_s")
             self.assertEqual(
                 data2["experiments"][1]["COMROOT"],
                 "gaeac7:/gpfs/f7/new_dir/com/rrfs/v2.1.4",
@@ -945,13 +1033,44 @@ class BaselineC6Tests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = self._make_fake_root(Path(tmpdir))
-            with patch.object(baselinec6, "ROOT", root), redirect_stderr(io.StringIO()):
+            with patch.object(baselinec6, "ROOT", root):
                 # Directory path given first instead of expname
-                self.assertEqual(baselinec6.main(["/gpfs/f6/some/path", "my_exp"]), 1)
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    self.assertEqual(baselinec6.main(["/gpfs/f6/some/path", "my_short"]), 1)
+                self.assertIn("Invalid <expname>", err.getvalue())
+
+                # Missing required <short_name>
+                for bad_args in (
+                    ["my_exp"],
+                    ["my_exp", "--slides-only"],
+                    ["--expname", "my_exp"],
+                    ["my_exp", "--short-name", "   "],
+                    ["my_exp", "--short-name="],
+                ):
+                    err = io.StringIO()
+                    with redirect_stderr(err), self.subTest(bad_args=bad_args):
+                        self.assertEqual(baselinec6.main(bad_args), 1)
+                        self.assertIn("short_name", err.getvalue())
+
+                # Missing value for --short-name
+                err = io.StringIO()
+                with redirect_stderr(err):
+                    self.assertEqual(baselinec6.main(["my_exp", "--short-name"]), 1)
+                self.assertIn("Missing value for --short-name", err.getvalue())
+
+                # Forgot <short_name> and put HPC path in 2nd position
+                for path_arg in ("/gpfs/f6/some/path", "gaeac6:/gpfs/f6/some/path", "/scratch3/some/path"):
+                    err = io.StringIO()
+                    with redirect_stderr(err), self.subTest(path_arg=path_arg):
+                        self.assertEqual(baselinec6.main(["my_exp", path_arg]), 1)
+                        self.assertIn("Invalid <short_name>", err.getvalue())
+
                 # Bare non-/gpfs/f6,/gpfs/f7 path without <cluster>:
-                self.assertEqual(baselinec6.main(["my_exp", "/scratch3/some/path"]), 1)
-                # Extra unexpected positional argument
-                self.assertEqual(baselinec6.main(["my_exp", "/gpfs/f6/some/path", "extra"]), 1)
+                with redirect_stderr(io.StringIO()):
+                    self.assertEqual(baselinec6.main(["my_exp", "my_s", "/scratch3/some/path"]), 1)
+                    # Extra unexpected positional argument
+                    self.assertEqual(baselinec6.main(["my_exp", "my_s", "/gpfs/f6/some/path", "extra"]), 1)
 
     def test_main_omitted_hpc_dir_skips_target_comroot_keeps_baseline_graphics(self):
         from contextlib import redirect_stderr, redirect_stdout
@@ -974,10 +1093,12 @@ class BaselineC6Tests(unittest.TestCase):
                 patch.object(baselinec6, "ROOT", root),
                 patch.object(baselinec6, "automats_main", new=fake_automats_main),
             ):
-                rc1 = baselinec6.main(["existing_other", "--plan"])
+                rc1 = baselinec6.main(["existing_other", "other_s", "--plan"])
                 data1 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
 
             self.assertEqual(rc1, 0)
+            self.assertEqual(data1["experiments"][0]["short name"], "base4")
+            self.assertEqual(data1["experiments"][1]["short name"], "other_s")
             self.assertEqual(
                 data1["experiments"][0]["COMROOT"],
                 "gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4",
@@ -1007,11 +1128,11 @@ class BaselineC6Tests(unittest.TestCase):
                 patch("automats.cli.build_slides", side_effect=fake_build_slides),
             ):
                 with redirect_stdout(combined_meta), redirect_stderr(combined_meta):
-                    rc2 = baselinec6.main(["brand_new_exp", "--metadata-only"])
+                    rc2 = baselinec6.main(["brand_new_exp", "brand_s", "--metadata-only"])
                 with redirect_stdout(combined_slides_only), redirect_stderr(combined_slides_only):
-                    rc3 = baselinec6.main(["brand_new_exp", "--slides-only"])
+                    rc3 = baselinec6.main(["brand_new_exp", "brand_s", "--slides-only"])
                 with redirect_stdout(out_only), redirect_stderr(err_only):
-                    rc4 = baselinec6.main(["brand_new_exp", "--slides-only"])
+                    rc4 = baselinec6.main(["brand_new_exp", "brand_s", "--slides-only"])
 
             expected_warning = "Warning: no pygraf graphics downloaded for 'brand_new_exp' as hpc_dir is missing."
             expected_saved_slides = f"Saved slides to {out_dir.resolve() / 'slides.pptx'}"
@@ -1039,7 +1160,7 @@ class BaselineC6Tests(unittest.TestCase):
                 redirect_stdout(io.StringIO()),
                 redirect_stderr(err_fail),
             ):
-                rc_fail = baselinec6.main(["brand_new_exp", "--slides-only"])
+                rc_fail = baselinec6.main(["brand_new_exp", "brand_s", "--slides-only"])
             self.assertEqual(rc_fail, 1)
             self.assertNotIn("no pygraf graphics downloaded", err_fail.getvalue())
 
@@ -1050,7 +1171,7 @@ class BaselineC6Tests(unittest.TestCase):
                 patch.object(baselinec6, "automats_main", side_effect=lambda cli_args: 0),
                 redirect_stderr(legacy_err),
             ):
-                rc_legacy = baselinec6.main(["brand_new_exp", "--plan"])
+                rc_legacy = baselinec6.main(["brand_new_exp", "brand_s", "--plan"])
             self.assertEqual(rc_legacy, 0)
             self.assertEqual(legacy_err.getvalue().strip(), expected_warning)
 
@@ -1082,11 +1203,13 @@ class BaselineC6Tests(unittest.TestCase):
                 patch.object(baselinec6, "ROOT", root),
                 patch.object(baselinec6, "automats_main", side_effect=fake_automats_main),
             ):
-                rc = baselinec6.main(["my_exp", "/gpfs/f7/some/com/rrfs/v2"])
+                rc = baselinec6.main(["my_exp", "my_s", "/gpfs/f7/some/com/rrfs/v2"])
 
             self.assertEqual(rc, 0)
             data = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
             self.assertEqual(data["experiments"][0]["name"], baselinec6.BASELINE_EXPERIMENT)
+            self.assertEqual(data["experiments"][0]["short name"], baselinec6.BASELINE_SHORT_NAME)
+            self.assertEqual(data["experiments"][1]["short name"], "my_s")
             self.assertEqual(
                 data["experiments"][0]["COMROOT"],
                 baselinec6.resolve_comroot(baselinec6.BASELINE_HPC_DIR),

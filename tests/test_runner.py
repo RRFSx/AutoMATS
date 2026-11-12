@@ -1295,6 +1295,124 @@ class MetadataTests(unittest.TestCase):
             self.assertEqual(fig_meta_custom["height"] - fig_meta_custom["header_height"], 300)
             self.assertLess(fig_meta_custom["header_height"], fig_meta_v9["header_height"])
 
+    def test_short_name_renders_short_legends_and_refreshes_legacy_cache_via_metadata_only(self):
+        try:
+            from io import BytesIO
+            from PIL import Image
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.skipTest("Playwright or Pillow is not installed")
+
+        raw = example()
+        raw["experiments"] = [
+            {"name": "RRFSv2_conus_3km_ret_v2x_retv4", "color": "red", "overlay": True},
+            {"name": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km", "color": "blue", "overlay": True},
+        ]
+        raw["plots"][0]["forecast lead time"] = [0, "0+3"]
+        plan_long = build_plan(raw)
+        job_long = plan_long.jobs[0]
+
+        raw_short = deepcopy(raw)
+        raw_short["experiments"][0]["short name"] = "base4"
+        raw_short["experiments"][1]["short name"] = "3p5km"
+        plan_short = build_plan(raw_short)
+        plan_short_single = replace(plan_short, jobs=plan_short.jobs[:1])
+        job_short = plan_short.jobs[0]
+        grouped_short = plan_short.jobs[1]
+        self.assertEqual(job_long.fingerprint, job_short.fingerprint)
+
+        with sync_playwright() as manager:
+            try:
+                browser = manager.chromium.launch(channel="chrome", headless=True)
+            except Exception as error:
+                self.skipTest(f"Installed Chrome unavailable: {error}")
+            try:
+                page = browser.new_page()
+                chart = bytes(page.evaluate("""() => {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = 1600; canvas.height = 300;
+                    const context = canvas.getContext('2d');
+                    context.fillStyle = 'green'; context.fillRect(0, 0, 1600, 300);
+                    return Array.from(Uint8Array.from(atob(canvas.toDataURL('image/png').split(',')[1]),
+                        character => character.charCodeAt(0)));
+                }"""))
+
+                # 1. Single-lead primary legend + partial curve filtering + grouped leads + diff curves
+                _, meta_short = annotate_image(page, job_short, chart)
+                self.assertEqual(meta_short["legend_names"], ["base4", "3p5km"])
+
+                _, meta_partial = annotate_image(
+                    page, job_short, chart,
+                    plotted_curves=[{"name": "RRFSv2_conus_3km_ret_v2x_retv4", "lead": 0}],
+                )
+                self.assertEqual(meta_partial["legend_names"], ["base4"])
+
+                _, meta_grouped = annotate_image(page, grouped_short, chart)
+                self.assertEqual(meta_grouped["legend_names"], ["base4 f000h", "base4 f003h"])
+
+                diff_job = replace(job_short, parameters=(("Difference curves", "Diff all curves against the 1st added curve"),))
+                plot_params = {
+                    "curves": [
+                        {"data-source": "RRFSv2_conus_3km_ret_v2x_retv4", "label": "RRFSv2conus3kmretv2xretv4", "diffFrom": None},
+                        {"data-source": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km", "label": "RRFSv2conus3kmretv2xretv4p13p5km", "diffFrom": None},
+                        {"data-source": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km", "label": "diff", "color": "rgb(255,165,0)", "diffFrom": [1, 0]},
+                    ]
+                }
+                _, meta_diff_params = annotate_image(page, diff_job, chart, plot_params=plot_params)
+                self.assertEqual(meta_diff_params["legend_names"], ["base4", "3p5km", "3p5km - base4"])
+                self.assertEqual(meta_diff_params["diff_legend_names"], ["3p5km - base4"])
+
+                _, meta_diff_fallback = annotate_image(page, diff_job, chart)
+                self.assertEqual(meta_diff_fallback["legend_names"], ["base4", "3p5km", "3p5km - base4"])
+
+                # 2. Cached figure rendered previously with long names transitions cleanly via --metadata-only
+                old_png, old_meta = annotate_image(page, job_long, chart, plot_params=plot_params)
+            finally:
+                browser.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            figures = root / "figures"
+            store = ResultStore(figures, plan_long.settings.base_url)
+            store.save(job_long, old_png, {
+                "figure": old_meta,
+                "plot_params": plot_params,
+                "curves": [{"name": "RRFSv2_conus_3km_ret_v2x_retv4", "lead": 0}],
+            })
+            # Simulate a pre-short_name record lacking 'legend_labels'
+            del store.state["results"][job_long.relative_path]["legend_labels"]
+            store.flush()
+
+            self.assertTrue(store.completed(job_long))
+            self.assertFalse(store.completed(job_short))
+            self.assertTrue(store.completed(job_short, current_style=False))
+
+            with patch("automats.runner.Path.home", return_value=root), redirect_stdout(StringIO()):
+                self.assertEqual(run_plan(plan_short_single, figures, metadata_only=True), 1)
+                self.assertEqual(run_plan(plan_short_single, figures, metadata_only=True), 0)
+
+            store_after = ResultStore(figures, plan_short_single.settings.base_url)
+            self.assertTrue(store_after.completed(job_short))
+            refreshed_rec = store_after.state["results"][job_short.relative_path]
+            self.assertEqual(refreshed_rec["legend_labels"], ["base4", "3p5km"])
+            self.assertEqual(refreshed_rec["mats"]["figure"]["legend_names"], ["base4", "3p5km - base4"])
+            with Image.open(BytesIO((figures / job_short.relative_path).read_bytes())) as refreshed_img:
+                self.assertEqual(refreshed_img.size[1] - refreshed_rec["mats"]["figure"]["header_height"], 300)
+
+            # Updating a short name also triggers a local refresh
+            raw_renamed = deepcopy(raw_short)
+            raw_renamed["experiments"][1]["short name"] = "exp3p5"
+            plan_renamed = build_plan(raw_renamed)
+            plan_renamed_single = replace(plan_renamed, jobs=plan_renamed.jobs[:1])
+            self.assertFalse(store_after.completed(plan_renamed_single.jobs[0]))
+            self.assertTrue(store_after.completed(plan_renamed_single.jobs[0], current_style=False))
+            with patch("automats.runner.Path.home", return_value=root), redirect_stdout(StringIO()):
+                self.assertEqual(run_plan(plan_renamed_single, figures, metadata_only=True), 1)
+            self.assertEqual(
+                ResultStore(figures, plan_renamed.settings.base_url).state["results"][job_short.relative_path]["legend_labels"],
+                ["base4", "exp3p5"],
+            )
+
 
 class ControlPacingTests(unittest.TestCase):
     def setUp(self):

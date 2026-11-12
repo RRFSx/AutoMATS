@@ -11,9 +11,11 @@
 
 experiments:
 - name: RRFSv2_conus_3km_ret_v2x_retv4
+  short name: base4
   color: red
   COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
 - name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
+  short name: 3p5km
   color: blue
   COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
 - name: HRRR_OPS

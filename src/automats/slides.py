@@ -129,7 +129,7 @@ def derive_deck_title(plan: Plan) -> str:
         return f"Realtime Verification runs{cluster_str}"
 
     if plan.experiments:
-        labels = [e.label or e.name for e in plan.experiments]
+        labels = [e.display_name or e.name for e in plan.experiments]
         return f"{' vs '.join(labels[:3])} Verification{cluster_str}"
 
     if plan.recipe_path:
@@ -320,7 +320,11 @@ def populate_overview_slide(
             etf.word_wrap = True
 
             ep1 = etf.paragraphs[0]
-            ep1.text = exp.name
+            ep1.text = (
+                f"{exp.short_name} ({exp.name})"
+                if exp.short_name and exp.short_name != exp.name
+                else exp.name
+            )
             ep1.font.size = Pt(13)
             ep1.font.bold = True
             ep1.font.color.rgb = c_rgb

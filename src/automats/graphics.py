@@ -369,7 +369,7 @@ def _ensure_hpc_worker_if_master_alive(
 
 
 def resolve_experiment(ref: str, experiments: tuple[Experiment, ...]) -> Optional[Experiment]:
-    """Resolves an experiment reference ('first', 'second', experiment name/label)."""
+    """Resolves an experiment reference ('first', 'second', experiment name/short name/label)."""
     norm = ref.strip().lower()
     if norm in ORDINALS:
         idx = ORDINALS[norm]
@@ -377,7 +377,11 @@ def resolve_experiment(ref: str, experiments: tuple[Experiment, ...]) -> Optiona
             return experiments[idx]
         return None
     for exp in experiments:
-        if exp.name.lower() == norm or exp.label.lower() == norm:
+        if (
+            exp.name.lower() == norm
+            or exp.label.lower() == norm
+            or (exp.short_name and exp.short_name.lower() == norm)
+        ):
             return exp
     return None
 
@@ -1304,7 +1308,7 @@ def process_graphics_slides(
         else:
             exp_ref = spec.get("experiment", "first")
             exp_obj = resolve_experiment(exp_ref, plan.experiments)
-            exp_name = exp_obj.name if exp_obj else exp_ref
+            exp_name = exp_obj.display_name if exp_obj else exp_ref
             title_line1 = title
             title_line2 = f"{exp_name}   •   Cycle: {cycle}"
 
@@ -1358,7 +1362,7 @@ def process_graphics_slides(
                 elif "valid" in slide_type:
                     # 'same valid time': item is experiment reference (e.g. 'first', 'second')
                     exp_obj = resolve_experiment(item_str, plan.experiments)
-                    caption_text = exp_obj.name if exp_obj else item_str
+                    caption_text = exp_obj.display_name if exp_obj else item_str
                     g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
                     clean_name, tile_extracted, fhr = parse_graphics_name(g_name)
 

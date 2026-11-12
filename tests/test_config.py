@@ -748,6 +748,78 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "legend font size"):
             build_plan(raw)
 
+    def test_experiment_short_name_display_and_fingerprint(self):
+        raw = example()
+        raw["experiments"] = [
+            {"name": "RRFSv2_conus_3km_ret_v2x_retv4", "color": "red", "overlay": True},
+            {"name": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km", "color": "blue", "overlay": True},
+        ]
+        raw["plots"][0]["forecast lead time"] = [0, "0+3"]
+        base_plan = build_plan(raw)
+        base_fps = [job.fingerprint for job in base_plan.jobs]
+
+        for key0, key1 in (("short name", "short_name"), ("short_name", "short name")):
+            with self.subTest(key0=key0, key1=key1):
+                with_short = deepcopy(raw)
+                with_short["experiments"][0][key0] = "base4"
+                with_short["experiments"][1][key1] = "3p5km"
+                plan = build_plan(with_short)
+                self.assertEqual([e.name for e in plan.experiments], [
+                    "RRFSv2_conus_3km_ret_v2x_retv4",
+                    "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+                ])
+                self.assertEqual([e.short_name for e in plan.experiments], ["base4", "3p5km"])
+                self.assertEqual([e.display_name for e in plan.experiments], ["base4", "3p5km"])
+                # Fingerprints and MATS query fields remain unchanged
+                self.assertEqual([job.fingerprint for job in plan.jobs], base_fps)
+                single_job, grouped_job = plan.jobs[0], plan.jobs[1]
+                self.assertEqual([c.name for c in single_job.curves], [
+                    "RRFSv2_conus_3km_ret_v2x_retv4",
+                    "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+                ])
+                self.assertEqual([c.label for c in single_job.curves], [
+                    "RRFSv2conus3kmretv2xretv4",
+                    "RRFSv2conus3kmretv2xretv4p13p5km",
+                ])
+                self.assertEqual([e.name for e in single_job.legend_entries], ["base4", "3p5km"])
+                self.assertEqual([e.name for e in grouped_job.legend_entries], ["base4 f000h", "base4 f003h"])
+
+        # overlay: false keeps path slug derived from canonical exp.name
+        separate = deepcopy(raw)
+        separate["experiments"][0]["overlay"] = False
+        separate["experiments"][0]["short name"] = "base4"
+        sep_plan = build_plan(separate)
+        self.assertTrue(any(
+            job.relative_path.startswith("ua_profile/RRFSv2conus3kmretv2xretv4-1/")
+            for job in sep_plan.jobs
+        ))
+        self.assertFalse(any("base4" in job.relative_path for job in sep_plan.jobs))
+
+        # exclude / include experiment match short_name
+        filtered = deepcopy(raw)
+        filtered["experiments"][0]["short name"] = "base4"
+        filtered["experiments"][1]["short name"] = "3p5km"
+        filtered["plots"][0]["exclude experiment"] = ["base4"]
+        self.assertEqual([e.name for e in build_plan(filtered).jobs[0].experiments], [
+            "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km"
+        ])
+        filtered["plots"][0].pop("exclude experiment")
+        filtered["plots"][0]["include experiment"] = ["3p5km"]
+        self.assertEqual([e.name for e in build_plan(filtered).jobs[0].experiments], [
+            "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km"
+        ])
+
+        # Invalid or conflicting short name spellings fail explicitly
+        bad_conflicting = deepcopy(raw)
+        bad_conflicting["experiments"][0].update({"short name": "b4", "short_name": "base4"})
+        with self.assertRaisesRegex(ConfigError, "short name"):
+            build_plan(bad_conflicting)
+        for bad_val in ("", "   ", "---", 123):
+            bad = deepcopy(raw)
+            bad["experiments"][0]["short name"] = bad_val
+            with self.subTest(bad_val=bad_val), self.assertRaisesRegex(ConfigError, "short name"):
+                build_plan(bad)
+
 
 if __name__ == "__main__":
     unittest.main()

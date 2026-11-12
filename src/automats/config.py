@@ -65,10 +65,15 @@ class Experiment:
     color: str
     overlay: bool = True
     COMROOT: str | None = None
+    short_name: str | None = None
 
     @property
     def label(self) -> str:
         return re.sub(r"[^A-Za-z0-9]", "", self.name)
+
+    @property
+    def display_name(self) -> str:
+        return self.short_name or self.name
 
     @property
     def hpc_cluster(self) -> str | None:
@@ -154,8 +159,12 @@ class PlotJob:
     @property
     def legend_entries(self) -> tuple[Experiment, ...]:
         if len(self.leads) == 1:
-            return self.experiments
-        return tuple(Experiment(f"{experiment.name} f{lead:03d}h", self.lead_color(index))
+            return tuple(
+                Experiment(experiment.display_name, experiment.color, experiment.overlay,
+                           experiment.COMROOT, experiment.short_name)
+                for experiment in self.experiments
+            )
+        return tuple(Experiment(f"{experiment.display_name} f{lead:03d}h", self.lead_color(index))
                      for experiment in self.experiments for index, lead in enumerate(self.leads))
 
     @property
@@ -163,6 +172,9 @@ class PlotJob:
         configuration = asdict(self)
         configuration.pop("description_font_size", None)
         configuration.pop("legend_font_size", None)
+        for experiment in configuration.get("experiments", ()):
+            if isinstance(experiment, dict):
+                experiment.pop("short_name", None)
         if not self.forecast_lead_colors:
             configuration.pop("forecast_lead_colors")
         if self.application == "upperair":
@@ -471,15 +483,27 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
     experiments = []
     for index, item in enumerate(_choices(raw.get("experiments"), "experiments")):
         item = _mapping(item, f"experiment {index + 1}")
-        if set(item) - {"name", "color", "overlay", "COMROOT"}:
-            raise ConfigError(f"Unknown experiment options: {sorted(set(item) - {'name', 'color', 'overlay', 'COMROOT'})}; use name for the curve label")
+        allowed_exp = {"name", "color", "overlay", "COMROOT", "short name", "short_name"}
+        if set(item) - allowed_exp:
+            raise ConfigError(
+                f"Unknown experiment options: {sorted(set(item) - allowed_exp)}; "
+                "use name for the curve label and optional short name for display"
+            )
+        if "short name" in item and "short_name" in item:
+            raise ConfigError("Use only one short name spelling in experiment")
         name = _text(item.get("name"), "experiment.name")
         if not re.search(r"[A-Za-z0-9]", name):
             raise ConfigError("experiment.name must contain an alphanumeric character for its MATS curve label")
+        raw_short = item["short name"] if "short name" in item else item.get("short_name")
+        short_name = None
+        if raw_short is not None:
+            short_name = _text(raw_short, "experiment.short name")
+            if not re.search(r"[A-Za-z0-9]", short_name):
+                raise ConfigError("experiment.short name must contain an alphanumeric character")
         color = _text(item.get("color", LEAD_COLORS[index % len(LEAD_COLORS)]), "experiment.color")
         overlay = _boolean(item.get("overlay", True), "experiment.overlay")
         comroot = _text(item["COMROOT"], "experiment.COMROOT") if "COMROOT" in item and item["COMROOT"] is not None else None
-        experiments.append(Experiment(name, color, overlay, comroot))
+        experiments.append(Experiment(name, color, overlay, comroot, short_name))
     if len({item.name for item in experiments}) != len(experiments):
         notices.append("Repeated experiment names: these entries query the same MATS model, not different experiments.")
     jobs = []
@@ -508,14 +532,24 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
 
         plot_experiments = list(experiments)
         normalize = lambda s: re.sub(r"[\s_-]+", "", s.casefold())
+
+        def _match_experiment(norm_val: str) -> list[Experiment]:
+            matched = []
+            for exp in experiments:
+                candidates = {normalize(exp.name), normalize(exp.label)}
+                if exp.short_name:
+                    candidates.add(normalize(exp.short_name))
+                if norm_val in candidates:
+                    matched.append(exp)
+            return matched
+
         if exclude_keys:
             raw_excluded = item[exclude_keys[0]]
             excluded_names = [_text(val, f"plot {name!r} {exclude_keys[0]}")
                               for val in _choices(raw_excluded, exclude_keys[0])]
             to_exclude = set()
             for val in excluded_names:
-                norm_val = normalize(val)
-                matches = [exp for exp in experiments if norm_val in {normalize(exp.name), normalize(exp.label)}]
+                matches = _match_experiment(normalize(val))
                 if not matches:
                     continue
                 if len(matches) > 1:
@@ -531,8 +565,7 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
                               for val in _choices(raw_included, include_keys[0])]
             to_include = set()
             for val in included_names:
-                norm_val = normalize(val)
-                matches = [exp for exp in experiments if norm_val in {normalize(exp.name), normalize(exp.label)}]
+                matches = _match_experiment(normalize(val))
                 if not matches:
                     available = [exp.name for exp in experiments]
                     raise ConfigError(f"Plot {name!r}: include experiment {val!r} does not match any configured experiment: {available}")

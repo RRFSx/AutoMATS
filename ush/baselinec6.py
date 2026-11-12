@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from automats.cli import main as automats_main
 
 BASELINE_EXPERIMENT = "RRFSv2_conus_3km_ret_v2x_retv4"
+BASELINE_SHORT_NAME = "base4"
 BASELINE_HPC_DIR = "/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4"
 
 
@@ -59,9 +60,11 @@ def usage(error_msg=None):
     if error_msg:
         print(f"Error: {error_msg}\n", file=sys.stderr)
     print(
-        f"Usage: {Path(__file__).name} <expname> [hpc_dir] [additional automats options...]\n"
+        f"Usage: {Path(__file__).name} <expname> <short_name> [hpc_dir] [additional automats options...]\n"
         "\n"
         f"Compares <expname> (experiment name in MATS) against the Gaea C6 baseline ({BASELINE_EXPERIMENT}).\n"
+        f"Uses <short_name> for figure legends and titles (baseline uses '{BASELINE_SHORT_NAME}'), while the\n"
+        "first overview slide displays both the short name and full MATS experiment name.\n"
         "If [hpc_dir] is provided, sets COMROOT for <expname> to download pygraf graphics:\n"
         "  - /gpfs/f6/... -> gaeac6:/gpfs/f6/...\n"
         "  - /gpfs/f7/... -> gaeac7:/gpfs/f7/...\n"
@@ -72,6 +75,7 @@ def usage(error_msg=None):
         "\n"
         "Common options:\n"
         "  --expname NAME     Experiment name in MATS (alternative to positional <expname>)\n"
+        "  --short-name NAME  Short display label for <expname> (alternative to positional <short_name>)\n"
         "  --hpc-dir, --comroot DIR\n"
         "                     HPC directory (COMROOT) for downloading graphics\n"
         "  --output-dir DIR   Output directory (default: results/baseline_c6_<expname>)\n"
@@ -95,6 +99,7 @@ def main(argv=None):
         return 0
 
     expname = None
+    short_name = None
     hpc_dir = None
     forward_args = []
     i = 0
@@ -112,6 +117,15 @@ def main(argv=None):
                 return 1
         elif arg.startswith("--expname="):
             expname = arg.split("=", 1)[1]
+        elif arg in ("--short-name", "--short_name"):
+            i += 1
+            if i < len(argv):
+                short_name = argv[i]
+            else:
+                usage(f"Missing value for {arg}")
+                return 1
+        elif arg.startswith(("--short-name=", "--short_name=")):
+            short_name = arg.split("=", 1)[1]
         elif arg in ("--comroot", "--hpc-dir", "--hpc_dir", "--dir"):
             i += 1
             if i < len(argv):
@@ -133,6 +147,8 @@ def main(argv=None):
             forward_args.append(arg)
         elif expname is None:
             expname = arg
+        elif short_name is None:
+            short_name = arg
         elif hpc_dir is None:
             hpc_dir = arg
         else:
@@ -140,12 +156,25 @@ def main(argv=None):
             return 1
         i += 1
 
-    if not expname:
+    if not expname or not expname.strip():
         usage("Missing required <expname> argument")
         return 1
+    expname = expname.strip()
 
-    if expname.startswith("/") or "/" in expname:
-        usage(f"Invalid <expname> '{expname}': expected MATS experiment name first, then [hpc_dir]")
+    if "/" in expname or ":" in expname or not re.search(r"[A-Za-z0-9]", expname):
+        usage(f"Invalid <expname> '{expname}': expected <expname> <short_name> [hpc_dir]")
+        return 1
+
+    if short_name is None or not short_name.strip():
+        usage("Missing required <short_name> argument")
+        return 1
+    short_name = short_name.strip()
+
+    if "/" in short_name or ":" in short_name or not re.search(r"[A-Za-z0-9]", short_name):
+        usage(
+            f"Invalid <short_name> '{short_name}': expected <expname> <short_name> [hpc_dir] "
+            "(short_name cannot be an HPC path containing '/' or ':')"
+        )
         return 1
 
     resolved_comroot = None
@@ -166,11 +195,16 @@ def main(argv=None):
 
     base_exp = {
         "name": BASELINE_EXPERIMENT,
+        "short name": BASELINE_SHORT_NAME,
         "color": "red",
         "COMROOT": resolve_comroot(BASELINE_HPC_DIR),
     }
 
-    target_exp = {"name": expname, "color": "blue"}
+    target_exp = {
+        "name": expname,
+        "short name": short_name,
+        "color": "blue",
+    }
     if resolved_comroot:
         target_exp["COMROOT"] = resolved_comroot
 

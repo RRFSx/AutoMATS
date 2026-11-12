@@ -68,6 +68,17 @@ class SlidesOverviewTests(unittest.TestCase):
             recipe_path=Path("comparison.yaml"),
         )
         self.assertEqual(derive_deck_title(plan), "EXP1 vs EXP2 Verification")
+        exp1_short = Experiment(name="RRFSv2_long_exp_1", short_name="base4", color="red")
+        exp2_short = Experiment(name="RRFSv2_long_exp_2", short_name="3p5km", color="blue")
+        plan_short = replace_exps = Plan(
+            jobs=(),
+            warnings=(),
+            settings=MagicMock(),
+            experiments=(exp1_short, exp2_short),
+            slides=(),
+            recipe_path=Path("comparison.yaml"),
+        )
+        self.assertEqual(derive_deck_title(plan_short), "base4 vs 3p5km Verification")
 
     def test_derive_deck_title_default(self):
         plan = Plan(
@@ -214,6 +225,37 @@ class SlidesOverviewTests(unittest.TestCase):
             ]
             self.assertIn(target_surface, nav_targets)
             self.assertIn(target_upper_air, nav_targets)
+
+            # Check overview slide experiment headings show short_name (full_name) when short_name differs
+            exp_short_1 = Experiment(
+                name="RRFSv2_conus_3km_ret_v2x_retv4",
+                short_name="base4",
+                color="red",
+                COMROOT="gaeac6:/gpfs/f6/com",
+            )
+            exp_short_2 = Experiment(
+                name="RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+                short_name="3p5km",
+                color="blue",
+            )
+            exp_plain = Experiment(name="HRRR_OPS", color="orange")
+            shapes_created.clear()
+            populate_overview_slide(
+                mock_slide,
+                Plan(
+                    jobs=(),
+                    warnings=(),
+                    settings=MagicMock(),
+                    experiments=(exp_short_1, exp_short_2, exp_plain),
+                    slides=(),
+                    recipe_path=Path("baseline.yaml"),
+                ),
+                section_first_slide,
+            )
+            texts = [s.text_frame.paragraphs[0].text for s in shapes_created]
+            self.assertIn("base4 (RRFSv2_conus_3km_ret_v2x_retv4)", texts)
+            self.assertIn("3p5km (RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km)", texts)
+            self.assertIn("HRRR_OPS", texts)
 
             # Test backlink
             content_slide = MagicMock()

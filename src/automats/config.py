@@ -62,6 +62,26 @@ def _lead_choice(value: Any) -> int | tuple[int, ...]:
     raise ConfigError("Forecast leads must be integers 0-999 or unique plus-separated integers, such as 0+1+3")
 
 
+def _split_comroot(comroot: str | None) -> tuple[str | None, str | None]:
+    if not comroot:
+        return None, None
+    raw = str(comroot).strip()
+    if not raw:
+        return None, None
+    match = re.match(r"^([A-Za-z0-9_-]+):(.*)$", raw)
+    if match:
+        cluster = match.group(1).strip().lower() or None
+        path = match.group(2).strip()
+        clean_path = (path.rstrip("/") or "/") if path else None
+        return cluster, clean_path
+    clean_path = raw.rstrip("/") or "/"
+    if clean_path == "/gpfs/f6" or clean_path.startswith("/gpfs/f6/"):
+        return "gaeac6", clean_path
+    if clean_path == "/gpfs/f7" or clean_path.startswith("/gpfs/f7/"):
+        return "gaeac7", clean_path
+    return None, clean_path
+
+
 @dataclass(frozen=True)
 class Experiment:
     name: str
@@ -80,15 +100,11 @@ class Experiment:
 
     @property
     def hpc_cluster(self) -> str | None:
-        if self.COMROOT and ":" in self.COMROOT:
-            return self.COMROOT.split(":", 1)[0].strip().lower()
-        return None
+        return _split_comroot(self.COMROOT)[0]
 
     @property
     def remote_comroot(self) -> str | None:
-        if self.COMROOT and ":" in self.COMROOT:
-            return self.COMROOT.split(":", 1)[1].strip()
-        return self.COMROOT
+        return _split_comroot(self.COMROOT)[1]
 
 
 @dataclass(frozen=True)
@@ -486,17 +502,21 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
     experiments = []
     for index, item in enumerate(_choices(raw.get("experiments"), "experiments")):
         item = _mapping(item, f"experiment {index + 1}")
-        allowed_exp = {"name", "color", "overlay", "COMROOT", "short name", "short_name"}
+        allowed_exp = {"MATS name", "MATS_name", "name", "color", "overlay", "COMROOT", "short name", "short_name"}
         if set(item) - allowed_exp:
             raise ConfigError(
                 f"Unknown experiment options: {sorted(set(item) - allowed_exp)}; "
-                "use name for the curve label and optional short name for display"
+                "use 'MATS name' for the curve label and optional 'short name' for display"
             )
+        name_keys = [k for k in ("MATS name", "MATS_name", "name") if k in item]
+        if len(name_keys) > 1:
+            raise ConfigError("Use only one MATS name spelling in experiment")
         if "short name" in item and "short_name" in item:
             raise ConfigError("Use only one short name spelling in experiment")
-        name = _text(item.get("name"), "experiment.name")
+        raw_name = item[name_keys[0]] if name_keys else None
+        name = _text(raw_name, "experiment.MATS name")
         if not re.search(r"[A-Za-z0-9]", name):
-            raise ConfigError("experiment.name must contain an alphanumeric character for its MATS curve label")
+            raise ConfigError("experiment.MATS name must contain an alphanumeric character for its MATS curve label")
         raw_short = item["short name"] if "short name" in item else item.get("short_name")
         short_name = None
         if raw_short is not None:

@@ -1300,7 +1300,8 @@ def process_graphics_slides(
         slide = deck.slides.add_slide(deck.slide_layouts[6])
 
         # Smartly wrap and structure title to avoid overlay with [ ⌂ Overview ] button
-        if "valid" in slide_type:
+        is_same_valid = "valid" in slide_type
+        if is_same_valid:
             g_name = spec.get("graphics name", "")
             clean_name, tile, fhr = parse_graphics_name(g_name)
             title_line1 = title
@@ -1327,15 +1328,35 @@ def process_graphics_slides(
         p1.font.bold = True
 
         p2 = heading.text_frame.add_paragraph()
-        p2.text = title_line2
         p2.alignment = PP_ALIGN.CENTER
-        p2.font.size = Pt(12.5)
-        p2.font.bold = True
         try:
             from pptx.dml.color import RGBColor
-            p2.font.color.rgb = RGBColor(70, 85, 105)
+            slate_rgb = RGBColor(70, 85, 105)
+            blue_rgb = RGBColor(0, 0, 255)
         except Exception:
-            pass
+            slate_rgb = None
+            blue_rgb = None
+
+        if is_same_valid:
+            p2.text = title_line2
+            p2.font.size = Pt(12.5)
+            p2.font.bold = True
+            if slate_rgb is not None:
+                p2.font.color.rgb = slate_rgb
+        else:
+            r_exp = p2.add_run()
+            r_exp.text = str(exp_name)
+            r_exp.font.size = Pt(12.5)
+            r_exp.font.bold = True
+            if blue_rgb is not None:
+                r_exp.font.color.rgb = blue_rgb
+
+            r_cycle = p2.add_run()
+            r_cycle.text = f"   •   Cycle: {cycle}"
+            r_cycle.font.size = Pt(12.5)
+            r_cycle.font.bold = True
+            if slate_rgb is not None:
+                r_cycle.font.color.rgb = slate_rgb
 
         row_gap = Inches(0.15)
         row_height = (avail_height - row_gap * (len(rows_data) - 1)) // len(rows_data)
@@ -1379,6 +1400,13 @@ def process_graphics_slides(
                             if exp_obj.name not in warned_missing_comroot:
                                 warned_missing_comroot.add(exp_obj.name)
                                 _emit_warning(f"[!] Warning: Experiment '{exp_obj.name}' has no COMROOT configured.")
+                        elif not exp_obj.hpc_cluster or not exp_obj.remote_comroot:
+                            if exp_obj.name not in warned_missing_comroot:
+                                warned_missing_comroot.add(exp_obj.name)
+                                _emit_warning(
+                                    f"[!] Warning: Experiment '{exp_obj.name}' COMROOT '{exp_obj.COMROOT}' "
+                                    "cannot infer an HPC cluster; prefix with <cluster>: (e.g. ursa:/path)."
+                                )
                         local_img = get_missing_placeholder(output_dir, clean_name)
                 else:
                     # 'same cycle': item is graphics filename (e.g. 'cref_full_sfc_f001.png')
@@ -1401,6 +1429,13 @@ def process_graphics_slides(
                             if exp_obj.name not in warned_missing_comroot:
                                 warned_missing_comroot.add(exp_obj.name)
                                 _emit_warning(f"[!] Warning: Experiment '{exp_obj.name}' has no COMROOT configured.")
+                        elif not exp_obj.hpc_cluster or not exp_obj.remote_comroot:
+                            if exp_obj.name not in warned_missing_comroot:
+                                warned_missing_comroot.add(exp_obj.name)
+                                _emit_warning(
+                                    f"[!] Warning: Experiment '{exp_obj.name}' COMROOT '{exp_obj.COMROOT}' "
+                                    "cannot infer an HPC cluster; prefix with <cluster>: (e.g. ursa:/path)."
+                                )
                         local_img = get_missing_placeholder(output_dir, clean_name)
 
                 # Measure and position image

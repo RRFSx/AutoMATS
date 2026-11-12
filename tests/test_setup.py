@@ -23,6 +23,9 @@ class SetupTests(unittest.TestCase):
             '#!/bin/sh\n'
             'printf "<call>\\n%s\\n" "$PWD" >> "$AUTOMATS_TEST_LOG"\n'
             'printf "%s\\n" "$@" >> "$AUTOMATS_TEST_LOG"\n'
+            'if [ -n "${PYTHONPATH:-}" ]; then\n'
+            '    printf "PYTHONPATH=%s\\n" "$PYTHONPATH" >> "$AUTOMATS_TEST_LOG"\n'
+            'fi\n'
             'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
             '    mkdir -p "$3/bin"\n'
             '    cp "$0" "$3/bin/python"\n'
@@ -50,7 +53,9 @@ class SetupTests(unittest.TestCase):
         self.assertTrue((self.project / ".venv" / "bin" / "python").exists())
         calls = self.log.read_text()
         self.assertIn(f"-m\nvenv\n{self.project / '.venv'}\n", calls)
-        self.assertIn(f"-m\npip\ninstall\n{self.project}\n", calls)
+        self.assertIn("-m\npip\ninstall\nPyYAML>=6.0,<7\nplaywright>=1.49,<2\npython-pptx>=1.0.2,<2\n", calls)
+        self.assertIn("-m\npip\nuninstall\n-y\nautomats\n", calls)
+        self.assertNotIn(f"-m\npip\ninstall\n{self.project}\n", calls)
         self.assertIn("Setup complete", result.stdout)
 
     def test_setup_reuses_existing_environment(self):
@@ -59,7 +64,8 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.log.read_text()
         self.assertNotIn("-m\nvenv\n", calls)
-        self.assertIn(f"-m\npip\ninstall\n{self.project}\n", calls)
+        self.assertIn("-m\npip\ninstall\nPyYAML>=6.0,<7\nplaywright>=1.49,<2\npython-pptx>=1.0.2,<2\n", calls)
+        self.assertNotIn(f"-m\npip\ninstall\n{self.project}\n", calls)
 
     def test_setup_leaves_unusable_environment_unchanged(self):
         environment = self.project / ".venv"
@@ -86,12 +92,23 @@ class SetupTests(unittest.TestCase):
     def test_launcher_preserves_arguments_directory_and_exit_code(self):
         self.install_fake_environment()
         self.environment["AUTOMATS_TEST_EXIT_CODE"] = "7"
+        self.environment.pop("PYTHONPATH", None)
         result = self.run_script("run.sh", "config with spaces.yaml", "--output-dir", "my figures", "--plan")
         self.assertEqual(result.returncode, 7)
         self.assertEqual(
             self.log.read_text().splitlines(),
             ["<call>", str(self.root), "-m", "automats", "config with spaces.yaml",
-             "--output-dir", "my figures", "--plan"],
+             "--output-dir", "my figures", "--plan", f"PYTHONPATH={self.project / 'src'}"],
+        )
+
+        self.log.unlink()
+        self.environment["PYTHONPATH"] = "/existing/lib"
+        result = self.run_script("run.sh", "--help")
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(
+            self.log.read_text().splitlines(),
+            ["<call>", str(self.root), "-m", "automats", "--help",
+             f"PYTHONPATH={self.project / 'src'}:/existing/lib"],
         )
 
     def test_launcher_reports_missing_environment(self):

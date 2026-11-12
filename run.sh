@@ -9,4 +9,5 @@ if [ ! -x "$venv_python" ]; then
     exit 1
 fi
 
+export PYTHONPATH="$script_dir/src${PYTHONPATH:+:$PYTHONPATH}"
 exec "$venv_python" -m automats "$@"

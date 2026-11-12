@@ -824,6 +824,33 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(bad_val=bad_val), self.assertRaisesRegex(ConfigError, "short name"):
                 build_plan(bad)
 
+    def test_experiment_mats_name_spellings_and_conflicts(self):
+        raw = example()
+        base_fps = [job.fingerprint for job in build_plan(raw).jobs]
+
+        for key0, key1 in (("MATS name", "MATS_name"), ("MATS_name", "name")):
+            with self.subTest(key0=key0, key1=key1):
+                alt = deepcopy(raw)
+                alt["experiments"][0][key0] = alt["experiments"][0].pop("name")
+                alt["experiments"][1][key1] = alt["experiments"][1].pop("name")
+                plan = build_plan(alt)
+                self.assertEqual([e.name for e in plan.experiments], ["RRFSv2x", "RRFSv2b"])
+                self.assertEqual([job.fingerprint for job in plan.jobs], base_fps)
+
+        # Conflicting spellings fail cleanly
+        for k1, k2 in (("MATS name", "name"), ("MATS name", "MATS_name"), ("MATS_name", "name")):
+            bad = deepcopy(raw)
+            bad["experiments"][0][k1] = "expA"
+            bad["experiments"][0][k2] = "expB"
+            with self.subTest(conflict=(k1, k2)), self.assertRaisesRegex(ConfigError, "MATS name"):
+                build_plan(bad)
+
+        # Missing any name key fails explicitly
+        missing = deepcopy(raw)
+        missing["experiments"][0].pop("name")
+        with self.assertRaisesRegex(ConfigError, "MATS name"):
+            build_plan(missing)
+
     def test_copy_used_recipes_copies_main_and_enabled_graphics_recipe_idempotently(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

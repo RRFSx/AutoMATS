@@ -194,14 +194,14 @@ def main(argv=None):
         data = yaml.safe_load(f)
 
     base_exp = {
-        "name": BASELINE_EXPERIMENT,
+        "MATS name": BASELINE_EXPERIMENT,
         "short name": BASELINE_SHORT_NAME,
         "color": "red",
         "COMROOT": resolve_comroot(BASELINE_HPC_DIR),
     }
 
     target_exp = {
-        "name": expname,
+        "MATS name": expname,
         "short name": short_name,
         "color": "blue",
     }

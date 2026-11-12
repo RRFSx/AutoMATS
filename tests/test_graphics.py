@@ -26,6 +26,25 @@ class GraphicsTests(unittest.TestCase):
         self.assertIsNone(exp2.hpc_cluster)
         self.assertIsNone(exp2.remote_comroot)
 
+        exp_f6 = Experiment(
+            name="RRFSv2_retv5",
+            color="blue",
+            COMROOT="/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2.retv5/com/rrfs/v2.1.4/",
+        )
+        self.assertEqual(exp_f6.hpc_cluster, "gaeac6")
+        self.assertEqual(
+            exp_f6.remote_comroot,
+            "/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2.retv5/com/rrfs/v2.1.4",
+        )
+
+        exp_f7 = Experiment(name="RRFS_f7", color="green", COMROOT="/gpfs/f7/some/com/rrfs/v2")
+        self.assertEqual(exp_f7.hpc_cluster, "gaeac7")
+        self.assertEqual(exp_f7.remote_comroot, "/gpfs/f7/some/com/rrfs/v2")
+
+        exp_other = Experiment(name="RRFS_other", color="purple", COMROOT="/gpfs/f60/not_f6")
+        self.assertIsNone(exp_other.hpc_cluster)
+        self.assertEqual(exp_other.remote_comroot, "/gpfs/f60/not_f6")
+
     def test_recipe_with_comroot_and_graphics_slides(self):
         raw = {
             "common": {"start": "2026-10-01T00:00:00Z", "end": "2026-10-15T00:00:00Z"},
@@ -150,6 +169,26 @@ class GraphicsTests(unittest.TestCase):
             self.assertIn("3p5km", slide1_texts)
             self.assertTrue(any("3p5km" in t and "Cycle: 2024050612" in t for t in slide2_texts))
             self.assertFalse(any("RRFSv2_conus_3km" in t for t in slide1_texts + slide2_texts))
+
+            # In 'type: same cycle', short name run is blue while cycle suffix stays slate gray
+            from pptx.dml.color import RGBColor
+            slide2_heading = next(
+                s for s in deck.slides[1].shapes
+                if s.has_text_frame and "3p5km" in s.text and "Cycle: 2024050612" in s.text
+            )
+            sub_p = slide2_heading.text_frame.paragraphs[1]
+            self.assertEqual(len(sub_p.runs), 2)
+            self.assertEqual(sub_p.runs[0].text, "3p5km")
+            self.assertEqual(sub_p.runs[0].font.color.rgb, RGBColor(0, 0, 255))
+            self.assertEqual(sub_p.runs[1].text, "   •   Cycle: 2024050612")
+            self.assertEqual(sub_p.runs[1].font.color.rgb, RGBColor(70, 85, 105))
+
+            # In 'type: same valid time', subtitle stays slate gray
+            slide1_heading = next(
+                s for s in deck.slides[0].shapes
+                if s.has_text_frame and "Cycle: 2024050612 F006" in s.text
+            )
+            self.assertEqual(slide1_heading.text_frame.paragraphs[1].font.color.rgb, RGBColor(70, 85, 105))
 
     def test_parse_graphics_name(self):
         # Standard .png
@@ -841,6 +880,46 @@ class GraphicsTests(unittest.TestCase):
             self.assertNotIn(f"session{expected_warning}", output)
             self.assertIn("Building pygraf graphics slides", output)
 
+            # 3. Bare /gpfs/f6/... infers gaeac6 for download, while unknown bare paths warn cleanly once
+            plan_inferred = build_plan({
+                "common": {"start": "2024-05-06T00:00:00Z", "end": "2024-05-07T00:00:00Z"},
+                "experiments": [
+                    {"name": "exp_f6", "color": "red", "COMROOT": "/gpfs/f6/exp1/com/rrfs/v2"},
+                    {"name": "exp_unknown", "color": "blue", "COMROOT": "/scratch3/exp2/com/rrfs/v2"},
+                ],
+                "plots": [
+                    {
+                        "name": "sfc_tseries",
+                        "application": "surface",
+                        "plot_type": "time series",
+                        "variable": ["t2m"],
+                        "statistic": ["rmse"],
+                    }
+                ],
+                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+            })
+            captured_tasks = []
+            err3 = io.StringIO()
+            deck3 = Presentation()
+            with (
+                patch.object(gfx, "test_hpc_session_ready", return_value=True),
+                patch.object(gfx, "batch_pull_graphics_files", side_effect=lambda tasks, **_: captured_tasks.extend(tasks) or {}),
+                patch("automats.mrms.fetch_mrms_images", return_value=None),
+                redirect_stderr(err3),
+            ):
+                added3 = gfx.process_graphics_slides(plan_inferred, tmp, deck3)
+
+            self.assertEqual(added3, 2)
+            self.assertEqual(len(captured_tasks), 1)
+            self.assertEqual(captured_tasks[0]["cluster"], "gaeac6")
+            self.assertIn("/gpfs/f6/exp1/com/rrfs/v2/rrfs.20240507/00/graphics/det/full/202405070006/cref_full_sfc_f006.png",
+                          captured_tasks[0]["remote_path"])
+            unknown_warning = (
+                "[!] Warning: Experiment 'exp_unknown' COMROOT '/scratch3/exp2/com/rrfs/v2' "
+                "cannot infer an HPC cluster; prefix with <cluster>: (e.g. ursa:/path)."
+            )
+            self.assertEqual(err3.getvalue().count(unknown_warning), 1)
+
 
 class BaselineC6Tests(unittest.TestCase):
     @staticmethod
@@ -943,13 +1022,13 @@ class BaselineC6Tests(unittest.TestCase):
 
             data = yaml.safe_load(tmp_recipe.read_text(encoding="utf-8"))
             self.assertEqual(len(data["experiments"]), 2)
-            self.assertEqual(data["experiments"][0]["name"], "RRFSv2_conus_3km_ret_v2x_retv4")
+            self.assertEqual(data["experiments"][0]["MATS name"], "RRFSv2_conus_3km_ret_v2x_retv4")
             self.assertEqual(data["experiments"][0]["short name"], baselinec6.BASELINE_SHORT_NAME)
             self.assertEqual(
                 data["experiments"][0]["COMROOT"],
                 "gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4",
             )
-            self.assertEqual(data["experiments"][1]["name"], "my_mats_exp")
+            self.assertEqual(data["experiments"][1]["MATS name"], "my_mats_exp")
             self.assertEqual(data["experiments"][1]["short name"], "my_short")
             self.assertEqual(data["experiments"][1]["color"], "blue")
             self.assertEqual(
@@ -992,7 +1071,7 @@ class BaselineC6Tests(unittest.TestCase):
             self.assertEqual(stderr_buf.getvalue(), "")
             tmp_recipe = Path(captured["args"][0])
             data = yaml.safe_load(tmp_recipe.read_text(encoding="utf-8"))
-            self.assertEqual(data["experiments"][1]["name"], "my_f7_exp")
+            self.assertEqual(data["experiments"][1]["MATS name"], "my_f7_exp")
             self.assertEqual(data["experiments"][1]["short name"], "my_f7_short")
             self.assertEqual(
                 data["experiments"][1]["COMROOT"],
@@ -1208,7 +1287,7 @@ class BaselineC6Tests(unittest.TestCase):
 
             self.assertEqual(rc, 0)
             data = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
-            self.assertEqual(data["experiments"][0]["name"], baselinec6.BASELINE_EXPERIMENT)
+            self.assertEqual(data["experiments"][0]["MATS name"], baselinec6.BASELINE_EXPERIMENT)
             self.assertEqual(data["experiments"][0]["short name"], baselinec6.BASELINE_SHORT_NAME)
             self.assertEqual(data["experiments"][1]["short name"], "my_s")
             self.assertEqual(

@@ -253,11 +253,14 @@ ANNOTATE_IMAGE = r"""async ({image, header, experiments, diffExperiments=[], sou
         context.fillStyle = 'white';
         context.fillRect(0, headerHeight, canvas.width, 18);
     }
-    const allNames = [...experiments.map(e => e.name), ...(diffExperiments || []).map(e => e.name)];
+    const allNames = legendItems.map(e => e.name);
     return {image:canvas.toDataURL('image/png'), width:canvas.width,
             height:canvas.height, header_height:headerHeight,
+            description_height:metadataHeight,
+            legend_top:legendTop,
             legend_rows:totalRows, legend_in_header:true,
             legend_names:allNames,
+            legend_items:legendItems.map(e => ({name:e.name, color:e.color})),
             description_font_size:descPx,
             legend_font_size:legPx};
 }"""
@@ -368,7 +371,8 @@ def annotate_image(page, job: PlotJob, image: bytes, previous_figure: dict | Non
     if not rendered["image"].startswith(prefix):
         raise RunError("Metadata rendering did not return a PNG")
     metadata = {key: rendered[key] for key in (
-        "width", "height", "header_height", "legend_rows", "legend_in_header", "legend_names",
+        "width", "height", "header_height", "description_height", "legend_top",
+        "legend_rows", "legend_in_header", "legend_names", "legend_items",
         "description_font_size", "legend_font_size")}
     metadata["header"] = header
     metadata["legend_styles"] = ["solid"]

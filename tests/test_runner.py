@@ -1452,10 +1452,56 @@ class MetadataTests(unittest.TestCase):
                 self.assertEqual(meta_diff_params["legend_rows"], 1)
                 self.assertEqual(meta_diff_params["legend_names"], ["base4", "3p5km", "3p5km - base4"])
                 self.assertEqual(meta_diff_params["diff_legend_names"], ["3p5km - base4"])
+                self.assertEqual(
+                    meta_diff_params["legend_items"],
+                    [
+                        {"name": "base4", "color": "red"},
+                        {"name": "3p5km", "color": "blue"},
+                        {"name": "3p5km - base4", "color": "rgb(255,165,0)"},
+                    ],
+                )
+                self.assertGreater(meta_diff_params["description_height"], 0)
+                self.assertLessEqual(meta_diff_params["description_height"], meta_diff_params["legend_top"])
+                self.assertLess(meta_diff_params["legend_top"], meta_diff_params["header_height"])
 
-                _, meta_diff_fallback = annotate_image(page, diff_job, chart)
+                diff_png, meta_diff_fallback = annotate_image(page, diff_job, chart)
                 self.assertEqual(meta_diff_fallback["legend_rows"], 1)
                 self.assertEqual(meta_diff_fallback["legend_names"], ["base4", "3p5km", "3p5km - base4"])
+                self.assertGreater(meta_diff_fallback["legend_top"], meta_diff_fallback["description_height"])
+                from automats.slides import _prepare_slide_png
+                no_legend_png, _, no_legend_h = _prepare_slide_png(
+                    diff_png,
+                    meta_diff_fallback["width"],
+                    meta_diff_fallback["height"],
+                    meta_diff_fallback,
+                    drop_caption=False,
+                    drop_legend=True,
+                )
+                no_cap_png, _, no_cap_h = _prepare_slide_png(
+                    diff_png,
+                    meta_diff_fallback["width"],
+                    meta_diff_fallback["height"],
+                    meta_diff_fallback,
+                    drop_caption=True,
+                    drop_legend=False,
+                )
+                both_dropped_png, _, both_h = _prepare_slide_png(
+                    diff_png,
+                    meta_diff_fallback["width"],
+                    meta_diff_fallback["height"],
+                    meta_diff_fallback,
+                    drop_caption=True,
+                    drop_legend=True,
+                )
+                self.assertEqual(both_h, 300)
+                self.assertLess(both_h, no_legend_h)
+                self.assertLess(both_h, no_cap_h)
+                self.assertLess(no_legend_h, meta_diff_fallback["height"])
+                self.assertLess(no_cap_h, meta_diff_fallback["height"])
+                with Image.open(BytesIO(no_cap_png)) as cap_stripped_img:
+                    # Top strip of retained legend PNG starts cleanly in white before legend ink
+                    top_band = cap_stripped_img.crop((0, 0, meta_diff_fallback["width"], 2)).convert("RGB")
+                    self.assertGreaterEqual(min(top_band.getextrema()[0][0], top_band.getextrema()[1][0], top_band.getextrema()[2][0]), 245)
 
                 # 2. Cached figure rendered previously with long names transitions cleanly via --metadata-only
                 old_png, old_meta = annotate_image(page, job_long, chart, plot_params=plot_params)
@@ -2820,6 +2866,445 @@ class SlideTests(unittest.TestCase):
                     f"Saved slides to {(output / 'slides.pptx').resolve()}",
                 ],
             )
+
+    def test_slide_deduplication_shared_caption_and_legend_box_layouts(self):
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from pptx.util import Inches
+
+        def make_annotated_png(w: int, h: int, desc_h: int, leg_top: int, hh: int, chart_color: str) -> bytes:
+            img = Image.new("RGB", (w, h), "white")
+            draw = ImageDraw.Draw(img)
+            # Simulated caption band (y = 10..desc_h-6), clean white gap (desc_h..leg_top),
+            # simulated legend band (y = leg_top+4..hh-6), then chart body (hh..h).
+            draw.rectangle((40, 12, w - 40, desc_h - 6), fill=(35, 35, 35))
+            draw.rectangle((40, leg_top + 4, min(w - 40, 420), hh - 6), fill=(220, 40, 40))
+            draw.rectangle((0, hh, w, h), fill=chart_color)
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+
+        def assert_no_overlaps(slide):
+            boxes = [
+                (s.name or f"shape_{i}", (s.left, s.top, s.left + s.width, s.top + s.height))
+                for i, s in enumerate(slide.shapes)
+                if not s.name.startswith("Legend Swatch ")
+                and not s.name.startswith("Legend Marker ")
+                and not s.name.startswith("Legend Label ")
+            ]
+            for i in range(len(boxes)):
+                for j in range(i + 1, len(boxes)):
+                    a = boxes[i][1]
+                    b = boxes[j][1]
+                    ox = max(a[0], b[0]) < min(a[2], b[2]) - 100
+                    oy = max(a[1], b[1]) < min(a[3], b[3]) - 100
+                    self.assertFalse(ox and oy, f"Overlap between {boxes[i][0]} and {boxes[j][0]}: {a} vs {b}")
+
+        raw = example()
+        raw["experiments"] = [
+            {"name": "RRFS_BASE", "short name": "base4", "color": "red"},
+            {"name": "RRFS_NEW", "short name": "3p5km", "color": "blue"},
+        ]
+        raw["plots"] = [
+            {
+                "name": "sfc_dieoff", "application": "surface", "plot_type": "dieoff",
+                "truth": "METAR", "region": "All HRRR domain",
+                "variable": ["t2m", "td2m", "wind10m"], "statistic": ["rmse+bias"],
+            },
+            {
+                "name": "radar_dieoff", "application": "radar", "plot_type": "dieoff",
+                "truth": "MRMS", "region": "CONUS",
+                "variable": "Composite Reflectivity", "statistic": ["csi"],
+                "Threshold": [25, 35, 45],
+            },
+            {
+                "name": "ceiling_dieoff", "application": "ceil-vis", "plot_type": "dieoff",
+                "truth": "METAR", "region": "CONUS",
+                "variable": "Ceiling", "statistic": ["csi"],
+                "Threshold": [500, 1000, 3000, 6000],
+            },
+        ]
+        raw["slides"] = [
+            {
+                "plot group": "sfc_dieoff", "title": "Different Captions Same Legend (2+1)",
+                "number of rows": 2,
+                "row1": ["t2m_rmse+bias", "td2m_rmse+bias"],
+                "row2": ["wind10m_rmse+bias"],
+            },
+            {
+                "plot group": "radar_dieoff", "title": "Same Caption Same Legend (2+1)",
+                "number of rows": 2,
+                "row1": ["threshold25", "threshold35"],
+                "row2": ["threshold45"],
+            },
+            {
+                "plot group": "ceiling_dieoff", "title": "Full 2x2 Grid Same Caption Same Legend",
+                "number of rows": 2,
+                "row1": ["threshold500", "threshold1000"],
+                "row2": ["threshold3000", "threshold6000"],
+            },
+            {
+                "plot group": "radar_dieoff", "title": "Same Caption Different Legends (2+1)",
+                "number of rows": 2,
+                "row1": ["threshold25", "threshold35"],
+                "row2": ["threshold45"],
+            },
+            {
+                "plot group": "sfc_dieoff", "title": "Different Captions Different Legends",
+                "number of rows": 2,
+                "row1": ["t2m_rmse+bias", "td2m_rmse+bias"],
+                "row2": ["wind10m_rmse+bias"],
+            },
+        ]
+        plan = build_plan(raw)
+
+        # Customize slides 4 and 5 in a separate output dir so we don't mutate records shared with slides 1-2.
+        w, h, desc_h, leg_top, hh = 1600, 1020, 42, 50, 96
+        orig_bytes_by_path = {}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "deck1"
+            store = ResultStore(output, plan.settings.base_url)
+            common_leg = [{"name": "base4", "color": "red"}, {"name": "3p5km", "color": "blue"}]
+            sfc_idx = 0
+            for job in plan.jobs:
+                png = make_annotated_png(w, h, desc_h, leg_top, hh, "navy")
+                orig_bytes_by_path[job.relative_path] = png
+                if job.name == "sfc_dieoff":
+                    sfc_idx += 1
+                    header = [f"2024-05-0{sfc_idx}, Dieoff, {job.variable_tag}, RMSE"]
+                elif job.name == "radar_dieoff":
+                    header = ["2024-05-06, Dieoff, Composite Reflectivity, CSI"]
+                else:
+                    header = ["2024-05-06, Dieoff, Ceiling, CSI"]
+                store.save(job, png, {
+                    "figure": {
+                        "width": w,
+                        "height": h,
+                        "header_height": hh,
+                        "description_height": desc_h,
+                        "legend_top": leg_top,
+                        "legend_rows": 1,
+                        "legend_in_header": True,
+                        "legend_names": ["base4", "3p5km"],
+                        "legend_items": common_leg,
+                        "legend_styles": ["solid"],
+                        "header": header,
+                        "description_font_size": 24,
+                        "legend_font_size": 28,
+                    },
+                })
+
+            plan_three = replace(plan, slides=plan.slides[:3])
+            deck = Presentation(build_slides(plan_three, output))
+            self.assertEqual(len(deck.slides), 4)
+
+            # Verify original PNG files on disk were NOT modified
+            for rel, expected in orig_bytes_by_path.items():
+                self.assertEqual((output / rel).read_bytes(), expected)
+
+            # Slide 1: Different captions + Same legend -> NO shared caption, legend stripped, bottom-right legend card
+            s1 = deck.slides[1]
+            assert_no_overlaps(s1)
+            self.assertIsNone(next((s for s in s1.shapes if s.name == "Slide Shared Caption"), None))
+            leg1 = next((s for s in s1.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg1)
+            self.assertGreaterEqual(leg1.left, deck.slide_width // 2)
+            self.assertGreaterEqual(leg1.top, Inches(4.0))
+            self.assertEqual(
+                [s.text for s in s1.shapes if s.name.startswith("Legend Label ")],
+                ["base4", "3p5km"],
+            )
+            pics1 = [s for s in s1.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            for pic in pics1:
+                with Image.open(BytesIO(pic.image.blob)) as im:
+                    self.assertLess(im.size[1], h)
+                    self.assertGreater(im.size[1], h - hh)
+
+            # Slide 2: Same caption + Same legend -> Shared caption under title, full header cropped, bottom-right legend card
+            s2 = deck.slides[2]
+            assert_no_overlaps(s2)
+            cap2 = next((s for s in s2.shapes if s.name == "Slide Shared Caption"), None)
+            self.assertIsNotNone(cap2)
+            self.assertEqual(cap2.text, "2024-05-06, Dieoff, Composite Reflectivity, CSI")
+            self.assertEqual(cap2.top, Inches(0.55))
+            self.assertLessEqual(cap2.top + cap2.height, Inches(0.90))
+            leg2 = next((s for s in s2.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg2)
+            self.assertGreaterEqual(leg2.left, deck.slide_width // 2)
+            self.assertGreaterEqual(leg2.top, Inches(4.0))
+            pics2 = [s for s in s2.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            for pic in pics2:
+                with Image.open(BytesIO(pic.image.blob)) as im:
+                    self.assertEqual(im.size, (w, h - hh))
+
+            # Slide 3: Full 2x2 grid + Same caption + Same legend -> compact legend in middle of middle empty column
+            s3 = deck.slides[3]
+            assert_no_overlaps(s3)
+            self.assertIsNotNone(next((s for s in s3.shapes if s.name == "Slide Shared Caption"), None))
+            leg3 = next((s for s in s3.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg3)
+            pics3 = sorted([s for s in s3.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE], key=lambda p: (p.top, p.left))
+            col0_right = max(pics3[0].left + pics3[0].width, pics3[2].left + pics3[2].width)
+            col1_left = min(pics3[1].left, pics3[3].left)
+            self.assertGreaterEqual(leg3.left, col0_right)
+            self.assertLessEqual(leg3.left + leg3.width, col1_left)
+            mid_y = (Inches(0.9) + (deck.slide_height - Inches(0.25))) / 2
+            self.assertAlmostEqual(leg3.top + leg3.height / 2, mid_y, delta=Inches(0.2))
+            self.assertLessEqual(leg3.width, Inches(1.1))
+            self.assertLessEqual(leg3.height, Inches(0.55))
+
+            # Now test Slide 4 (Same caption + Different legends) and Slide 5 (Different captions + Different legends)
+            output2 = Path(directory) / "deck2"
+            store2 = ResultStore(output2, plan.settings.base_url)
+            diff_leg_jobs = [j for j in plan.jobs if j.name in ("radar_dieoff", "sfc_dieoff")]
+            for idx, job in enumerate(diff_leg_jobs):
+                png = make_annotated_png(w, h, desc_h, leg_top, hh, "teal")
+                header = ["2024-05-06, Dieoff, Shared"] if job.name == "radar_dieoff" else [f"2024-05-06, Diff {idx}"]
+                items = [{"name": f"exp_{idx}", "color": "green"}] if idx == 0 else [{"name": f"exp_{idx}", "color": "blue"}]
+                store2.save(job, png, {
+                    "figure": {
+                        "width": w,
+                        "height": h,
+                        "header_height": hh,
+                        "description_height": desc_h,
+                        "legend_top": leg_top,
+                        "legend_rows": 1,
+                        "legend_in_header": True,
+                        "legend_names": [items[0]["name"]],
+                        "legend_items": items,
+                        "legend_styles": ["solid"],
+                        "header": header,
+                        "description_font_size": 24,
+                        "legend_font_size": 28,
+                    },
+                })
+            plan_two = replace(plan, slides=(plan.slides[3], plan.slides[4]))
+            deck2 = Presentation(build_slides(plan_two, output2))
+
+            # Slide 1 of deck2: Same caption + Different legends -> Shared caption added, NO legend box, caption-only cropped
+            s_cap_only = deck2.slides[1]
+            assert_no_overlaps(s_cap_only)
+            self.assertIsNotNone(next((s for s in s_cap_only.shapes if s.name == "Slide Shared Caption"), None))
+            self.assertIsNone(next((s for s in s_cap_only.shapes if s.name == "Slide Shared Legend"), None))
+            for pic in [s for s in s_cap_only.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]:
+                with Image.open(BytesIO(pic.image.blob)) as im:
+                    self.assertLess(im.size[1], h)
+                    self.assertGreater(im.size[1], h - hh)
+
+            # Slide 2 of deck2: Different captions + Different legends -> byte-for-byte original PNGs kept
+            s_none = deck2.slides[2]
+            assert_no_overlaps(s_none)
+            self.assertIsNone(next((s for s in s_none.shapes if s.name == "Slide Shared Caption"), None))
+            self.assertIsNone(next((s for s in s_none.shapes if s.name == "Slide Shared Legend"), None))
+            for pic in [s for s in s_none.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]:
+                self.assertEqual(pic.image.blob, (output2 / pic.name).read_bytes())
+
+    def test_slide_deduplication_handles_missing_placeholder_and_legacy_v10_state(self):
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+        w, h, hh = 1600, 1020, 96
+        img = Image.new("RGB", (w, h), "white")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((40, 10, w - 40, 38), fill=(35, 35, 35))
+        draw.rectangle((40, 56, 400, hh - 8), fill=(220, 40, 40))
+        draw.rectangle((0, hh, w, h), fill="navy")
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        v10_png = buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            store = ResultStore(output, self.plan.settings.base_url)
+            # Leave job 0 missing so slide uses a placeholder for row1 col1, while jobs 1 and 2 have v10 state
+            for job in self.plan.jobs[1:]:
+                store.save(job, v10_png, {
+                    "figure": {
+                        "width": w,
+                        "height": h,
+                        "header_height": hh,
+                        "legend_rows": 1,
+                        "legend_in_header": True,
+                        "legend_names": ["RRFSv2x", "RRFSv2b"],
+                        "legend_styles": ["solid"],
+                        "header": ["2024-05-06, Dieoff, Legacy Header"],
+                        "description_font_size": 24,
+                        "legend_font_size": 28,
+                    },
+                })
+            missing = []
+            deck = Presentation(build_slides(self.plan, output, log=lambda _: None, missing=missing))
+            self.assertEqual(len(missing), 1)
+            slide = deck.slides[1]
+            self.assertIsNotNone(next((s for s in slide.shapes if s.name == "Slide Shared Caption"), None))
+            self.assertIsNotNone(next((s for s in slide.shapes if s.name == "Slide Shared Legend"), None))
+            pics = [s for s in slide.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            # Placeholder keeps full job dimensions while existing real PNGs get cropped
+            with Image.open(BytesIO(pics[0].image.blob)) as ph_img:
+                self.assertEqual(ph_img.size, (self.plan.jobs[0].width, self.plan.jobs[0].height))
+            for real_pic in pics[1:]:
+                with Image.open(BytesIO(real_pic.image.blob)) as cropped:
+                    self.assertEqual(cropped.size, (w, h - hh))
+
+    def test_slide_deduplication_variable_lead_captions_2x3_and_1x1_layouts(self):
+        from io import BytesIO
+        from PIL import Image, ImageDraw
+        from pptx import Presentation
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from pptx.util import Inches
+
+        def make_png(w: int, h: int, desc_h: int, leg_top: int, hh: int) -> bytes:
+            img = Image.new("RGB", (w, h), "white")
+            draw = ImageDraw.Draw(img)
+            draw.rectangle((40, 10, w - 40, desc_h - 6), fill=(35, 35, 35))
+            draw.rectangle((40, leg_top + 4, min(w - 40, 420), hh - 6), fill=(40, 80, 220))
+            draw.rectangle((0, hh, w, h), fill="navy")
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+
+        def assert_no_overlaps(slide):
+            boxes = [
+                (s.name or f"shape_{i}", (s.left, s.top, s.left + s.width, s.top + s.height))
+                for i, s in enumerate(slide.shapes)
+                if not s.name.startswith("Legend Swatch ")
+                and not s.name.startswith("Legend Marker ")
+                and not s.name.startswith("Legend Label ")
+            ]
+            for i in range(len(boxes)):
+                for j in range(i + 1, len(boxes)):
+                    a = boxes[i][1]
+                    b = boxes[j][1]
+                    ox = max(a[0], b[0]) < min(a[2], b[2]) - 100
+                    oy = max(a[1], b[1]) < min(a[3], b[3]) - 100
+                    self.assertFalse(ox and oy, f"Overlap between {boxes[i][0]} and {boxes[j][0]}: {a} vs {b}")
+
+        raw = example()
+        raw["experiments"] = [
+            {"name": "RRFS_BASE", "short name": "base4", "color": "red"},
+            {"name": "RRFS_NEW", "short name": "3p5km", "color": "blue"},
+        ]
+        raw["plots"] = [
+            {
+                "name": "ua_dieoff", "application": "Upper Air", "plot_type": "dieoff",
+                "truth": "RAOBs (Traditional)", "region": "HRRR domain",
+                "variable": ["T", "RHobT", "Wind"], "statistic": ["rmse+bias"],
+            },
+            {
+                "name": "ua_profile", "application": "Upper Air", "plot_type": "profile",
+                "truth": "RAOBs (Traditional)", "region": "HRRR domain",
+                "variable": ["T", "RHobT", "Wind"], "statistic": ["rmse+bias"],
+                "forecast lead time": [3, 6],
+            },
+            {
+                "name": "ua_tseries", "application": "Upper Air", "plot_type": "time series",
+                "truth": "RAOBs (Traditional)", "region": "HRRR domain",
+                "variable": ["T"], "statistic": ["rmse+bias"],
+                "forecast lead time": [1],
+            },
+        ]
+        raw["slides"] = [
+            {
+                "plot group": "ua_dieoff", "title": "Upper Air Dieoff",
+                "number of rows": 2,
+                "row1": ["T_rmse+bias", "RHobT_rmse+bias"],
+                "row2": ["Wind_rmse+bias"],
+            },
+            {
+                "plot group": "ua_profile", "title": "Upper Air Profile f003, f006",
+                "number of rows": 2,
+                "row1": ["T_rmse+bias_f003", "RHobT_rmse+bias_f003", "Wind_rmse+bias_f003"],
+                "row2": ["T_rmse+bias_f006", "RHobT_rmse+bias_f006", "Wind_rmse+bias_f006"],
+            },
+            {
+                "plot group": "ua_tseries", "title": "Upper Air Time Series RMSE+Bias f001h",
+                "number of rows": 1,
+                "row1": ["T_rmse+bias_f001"],
+            },
+        ]
+        plan = build_plan(raw)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            store = ResultStore(output, plan.settings.base_url)
+            common_leg = [{"name": "base4", "color": "red"}, {"name": "3p5km", "color": "blue"}]
+            for job in plan.jobs:
+                w, h = job.width, job.height + 96
+                desc_h, leg_top, hh = 42, 50, 96
+                png = make_png(w, h, desc_h, leg_top, hh)
+                if job.name == "ua_dieoff":
+                    header = [f"2024-05-06, Dieoff, RAOBs, HRRR domain, {job.variable}, RMSE (solid) + BIAS (dashed), dieoff-type=Dieoff, top=1, bottom=1000"]
+                elif job.name == "ua_profile":
+                    header = [f"2024-05-06, Profile, f{job.lead:03d}h, RAOBs, HRRR domain, {job.variable}, RMSE (solid) + BIAS (dashed), top=1, bottom=1000"]
+                else:
+                    header = ["2024-05-06, TimeSeries, f001h, RAOBs, HRRR domain, Temperature, RMSE (solid) + BIAS (dashed), top=1, bottom=1000"]
+                store.save(job, png, {
+                    "effective_settings": {"curves": [{"variable": job.variable}]},
+                    "figure": {
+                        "width": w,
+                        "height": h,
+                        "header_height": hh,
+                        "description_height": desc_h,
+                        "legend_top": leg_top,
+                        "legend_rows": 1,
+                        "legend_in_header": True,
+                        "legend_names": ["base4", "3p5km"],
+                        "legend_items": common_leg,
+                        "legend_styles": ["solid"],
+                        "header": header,
+                        "description_font_size": 24,
+                        "legend_font_size": 28,
+                    },
+                })
+
+            deck = Presentation(build_slides(plan, output))
+            self.assertEqual(len(deck.slides), 4)
+
+            # Slide 1: Upper Air Dieoff (2+1) -> single shared caption omitting variable, dieoff-type stripped, compact bottom-right legend
+            s1 = deck.slides[1]
+            assert_no_overlaps(s1)
+            cap1 = next((s for s in s1.shapes if s.name == "Slide Shared Caption"), None)
+            self.assertIsNotNone(cap1)
+            self.assertEqual(cap1.text, "2024-05-06, Dieoff, RAOBs, HRRR domain, RMSE (solid) + BIAS (dashed), top=1, bottom=1000")
+            leg1 = next((s for s in s1.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg1)
+            self.assertGreaterEqual(leg1.left, deck.slide_width // 2)
+            self.assertGreaterEqual(leg1.top, Inches(4.0))
+            self.assertLessEqual(leg1.width, Inches(1.1))
+
+            # Slide 2: Upper Air Profile f003, f006 (2x3) -> single shared caption omitting variable & lead, legend in col 1..2 middle gap
+            s2 = deck.slides[2]
+            assert_no_overlaps(s2)
+            cap2 = next((s for s in s2.shapes if s.name == "Slide Shared Caption"), None)
+            self.assertIsNotNone(cap2)
+            self.assertEqual(cap2.text, "2024-05-06, Profile, RAOBs, HRRR domain, RMSE (solid) + BIAS (dashed), top=1, bottom=1000")
+            for pic in [s for s in s2.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]:
+                with Image.open(BytesIO(pic.image.blob)) as im:
+                    self.assertEqual(im.size, (1200, 1200))
+            leg2 = next((s for s in s2.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg2)
+            pics2 = sorted([s for s in s2.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE], key=lambda p: (p.top, p.left))
+            col1_right = max(pics2[1].left + pics2[1].width, pics2[4].left + pics2[4].width)
+            col2_left = min(pics2[2].left, pics2[5].left)
+            self.assertGreaterEqual(leg2.left, col1_right)
+            self.assertLessEqual(leg2.left + leg2.width, col2_left)
+            mid_y = (Inches(0.9) + (deck.slide_height - Inches(0.25))) / 2
+            self.assertAlmostEqual(leg2.top + leg2.height / 2, mid_y, delta=Inches(0.2))
+
+            # Slide 3: Upper Air Time Series (1x1) -> single shared caption, bottom-right legend strip below full figure
+            s3 = deck.slides[3]
+            assert_no_overlaps(s3)
+            self.assertIsNotNone(next((s for s in s3.shapes if s.name == "Slide Shared Caption"), None))
+            leg3 = next((s for s in s3.shapes if s.name == "Slide Shared Legend"), None)
+            self.assertIsNotNone(leg3)
+            pics3 = [s for s in s3.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+            self.assertGreaterEqual(leg3.top, pics3[0].top + pics3[0].height)
+            self.assertLessEqual(leg3.top + leg3.height, deck.slide_height)
+            self.assertGreaterEqual(leg3.left, deck.slide_width // 2)
 
 
 class CliTests(unittest.TestCase):

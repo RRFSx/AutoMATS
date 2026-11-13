@@ -11,6 +11,8 @@ from automats.config import (
     build_plan,
     copy_used_recipes,
     load_plan,
+    split_title_variable_spans,
+    title_contains_variable,
 )
 
 
@@ -916,6 +918,64 @@ class ConfigTests(unittest.TestCase):
             copied2 = copy_used_recipes(load_plan(disabled_recipe), out_dir2)
             self.assertEqual(copied2, (out_dir2 / "no_gfx.yaml",))
             self.assertFalse((out_dir2 / "gfx_layout.yaml").exists())
+
+    def test_title_contains_variable(self):
+        self.assertTrue(title_contains_variable("T2M Time Series RMSE+BIAS"))
+        self.assertTrue(title_contains_variable("Td2M Time Series RMSE+BIAS"))
+        self.assertTrue(title_contains_variable("Wind10m Time Series RMSE+BIAS"))
+        self.assertTrue(title_contains_variable("T RAOB Dieoff"))
+        self.assertTrue(title_contains_variable("RHobT RAOB Dieoff"))
+        self.assertTrue(title_contains_variable("Wind RAOB Dieoff"))
+        self.assertTrue(title_contains_variable("T ROAB Profile f000, f001"))
+        self.assertTrue(title_contains_variable("RADAR MRMS Dieoff CSI and Bias"))
+        self.assertTrue(title_contains_variable("Ceiling Dieoff CSI and Bias"))
+        self.assertTrue(title_contains_variable("Visibility Dieoff CSI and Bias"))
+        self.assertTrue(title_contains_variable("Composite Reflectivity"))
+        self.assertFalse(title_contains_variable("Surface Dieoff"))
+        self.assertFalse(title_contains_variable("Model Verification Overview"))
+        self.assertFalse(title_contains_variable(""))
+
+        self.assertEqual(
+            split_title_variable_spans("T RAOB Dieoff"),
+            [("T", True), (" RAOB Dieoff", False)],
+        )
+        self.assertEqual(
+            split_title_variable_spans("T2M Time Series RMSE+BIAS"),
+            [("T2M", True), (" Time Series RMSE+BIAS", False)],
+        )
+        self.assertEqual(
+            split_title_variable_spans("Surface Dieoff"),
+            [("Surface Dieoff", False)],
+        )
+
+    def test_profile_slides_label_valid_utc_hours(self):
+        raw = example()
+        raw["plots"] = [{
+            "name": "ROAB_profile",
+            "application": "Upper Air",
+            "plot_type": "profile",
+            "truth": "RAOBs (Traditional)",
+            "region": "HRRR domain",
+            "matched_samples": True,
+            "variable": ["Temperature"],
+            "statistic": ["rmse+bias"],
+            "forecast lead time": [0, 1],
+            "Valid UTC Hour": ["allz", "0z", "12z"],
+        }]
+        raw["slides"] = [{
+            "plot group": "ROAB_profile",
+            "title": "T ROAB Profile f000, f001",
+            "number of rows": 2,
+            "row1": ["f000_allz", "f000_0z", "f000_12z"],
+            "row2": ["f001_allz", "f001_0z", "f001_12z"],
+        }]
+        plan = build_plan(raw)
+        self.assertEqual(len(plan.slides), 1)
+        self.assertEqual(
+            plan.slides[0].captions,
+            (("allz", "0z", "12z"), ("allz", "0z", "12z")),
+        )
+
 
 
 if __name__ == "__main__":

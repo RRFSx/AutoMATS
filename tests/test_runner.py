@@ -1877,9 +1877,9 @@ class GenericBrowserTests(unittest.TestCase):
             const upperair=location.pathname.endsWith('/upperair');
             const definitions = {
                 'data-source':{options:['MODEL_A','MODEL_B']},
-                ...(upperair ? {database:{options:['RAOBs (Traditional)']}} : {truth:{options:['QC-METAR','METAR']}}),
+                ...(upperair ? {database:{options:['RAOBs (Traditional)', 'AMDAR (Traditional)', 'AMDAR (GDAS)']}} : {truth:{options:['QC-METAR','METAR']}}),
                 'region-type':{options:['Predefined region','Station']},
-                region:{options:radar ? ['Continental US'] : ['All HRRR domain','Other region']},
+                region:{options:radar ? ['Continental US'] : upperair ? ['HRRR domain', 'Full model domain', 'Other region'] : ['All HRRR domain','Other region']},
                 variable:{options:radar ? ['Composite Reflectivity'] : upperair ? ['Temperature','RHobT','Wind'] : ['Temperature at 2m (\\u00b0C)','Dewpoint at 2m (\\u00b0C)',
                     'Wind Speed at 10m (m/s)','U Speed at 10m','V Speed at 10m']},
                 statistic:{options:radar ? ['CSI','Bias'] : ['RMSE','Bias (Model - Obs)']},
@@ -2152,6 +2152,38 @@ class GenericBrowserTests(unittest.TestCase):
         self.assertEqual(client.application, "upperair")
         self.assertEqual(client.curves[0]["variable"], "Temperature")
         self.assertEqual(client.curves[0]["statistic"], "Bias (Model - Obs)")
+
+    def test_upperair_amdar_and_domain_aliases(self):
+        job = self.job(application="Upper Air (RAOBs/AMDAR)", truth="AMDAR (Traditional)",
+                       region="Full model domain", variable="T", statistic="rmse")
+        client = UpperAirBrowser(self.context, "https://gsl.noaa.gov/mats", minimize=False)
+        client.prepare(job)
+        self.assertEqual(client.application, "upperair")
+        self.assertEqual(client.curves[0]["database"], "AMDAR (Traditional)")
+        self.assertEqual(client.curves[0]["region"], "Full model domain")
+        self.assertEqual(client.curves[0]["variable"], "Temperature")
+        self.assertEqual(client.curves[0]["statistic"], "RMSE")
+
+        # Shorthand 'AMDAR' should map via alias to 'AMDAR (Traditional)' without ambiguity
+        job_short = self.job(application="Upper Air (RAOBs/AMDAR)", truth="AMDAR",
+                             region="Full model domain", variable="T", statistic="rmse")
+        client_short = UpperAirBrowser(self.context, "https://gsl.noaa.gov/mats", minimize=False)
+        client_short.prepare(job_short)
+        self.assertEqual(client_short.curves[0]["database"], "AMDAR (Traditional)")
+
+    def test_plot_aborts_immediately_when_info_modal_appears(self):
+        job = self.job()
+        client = UpperAirBrowser(self.context, "https://gsl.noaa.gov/mats", minimize=False)
+        client.prepare(job)
+        client.page.evaluate("""() => {
+            const modal = document.createElement('div');
+            modal.className = 'modal show';
+            modal.style.display = 'block';
+            modal.innerHTML = '<div class="modal-dialog"><div class="modal-content"><div class="modal-body">No valid data for any curves.</div><div class="modal-footer"><button type="button" class="btn" data-dismiss="modal">Clear</button></div></div></div>';
+            document.body.appendChild(modal);
+        }""")
+        with self.assertRaisesRegex(RunError, "No valid data for any curves"):
+            client.plot(job)
 
     def test_incompatible_workflow_fails_before_plot_submission(self):
         from playwright.sync_api import TimeoutError as BrowserTimeout

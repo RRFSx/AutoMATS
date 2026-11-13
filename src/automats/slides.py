@@ -12,7 +12,7 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
-from automats.config import Plan, PlotJob, copy_used_recipes
+from automats.config import Plan, PlotJob, copy_used_recipes, title_contains_variable, split_title_variable_spans
 
 
 class SlideError(ValueError):
@@ -411,7 +411,7 @@ def populate_overview_slide(
 
     obs_items = [
         ("Surface", "METAR / MADIS Surface Observations"),
-        ("Upper Air", "RAOBs (Traditional Soundings)"),
+        ("Upper Air", "RAOBs (Traditional Soundings) / AMDAR"),
         ("Radar Refl", "NOAA NSSL MRMS CREF Mosaic"),
         ("Ceiling & Vis", "METAR Observations"),
     ]
@@ -1342,8 +1342,18 @@ def build_slides(
                             all_real_have_header_meta = False
                     else:
                         all_real_have_header_meta = False
-                side_label = spec.captions[row_number - 1][column] if spec.captions else \
-                    Path(relative_path).stem[len(spec.plot_group) + 1:].split("_", 1)[0]
+                if spec.captions:
+                    side_label = spec.captions[row_number - 1][column]
+                else:
+                    stem = Path(relative_path).stem
+                    if "profile" in spec.plot_group.casefold():
+                        m = re.search(r"_(allz|\d+z)$", stem, re.IGNORECASE)
+                        if m:
+                            side_label = m.group(1).lower()
+                        else:
+                            side_label = stem[len(spec.plot_group) + 1:].split("_", 1)[0]
+                    else:
+                        side_label = stem[len(spec.plot_group) + 1:].split("_", 1)[0]
                 row_items.append({
                     "relative_path": relative_path,
                     "side_label": side_label,
@@ -1409,10 +1419,22 @@ def build_slides(
             heading.text_frame.margin_top = heading.text_frame.margin_bottom = 0
             heading.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
         paragraph = heading.text_frame.paragraphs[0]
-        paragraph.text = spec.title
+        paragraph.text = ""
         paragraph.alignment = PP_ALIGN.CENTER
-        paragraph.font.size = Pt(24)
-        paragraph.font.bold = True
+        spans = split_title_variable_spans(spec.title)
+        if spans:
+            for span_text, is_var in spans:
+                run = paragraph.add_run()
+                run.text = span_text
+                run.font.size = Pt(24)
+                run.font.bold = True
+                if is_var:
+                    run.font.color.rgb = RGBColor(0, 0, 255)
+        else:
+            run = paragraph.add_run()
+            run.text = spec.title
+            run.font.size = Pt(24)
+            run.font.bold = True
 
         if shared_caption:
             cap_w = deck.slide_width - Inches(0.70)

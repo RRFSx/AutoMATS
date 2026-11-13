@@ -50,6 +50,46 @@ VARIABLE_ALIASES = {
     "vspeed": "V Wind",
 }
 
+VARIABLE_TITLE_PATTERN = re.compile(
+    r"\b("
+    r"T2M|Td2M|RH2M|Wind10M|Wspeed|Uspeed|Vspeed|PSFC|PMSL|SLP|"
+    r"T|Td|RHobT|RH|Wind|Temperature|Dewpoint|Relative\s+Humidity|"
+    r"Ceiling|CIG|Visibility|VIS|"
+    r"Composite\s+Reflectivity|RADAR\s+MRMS|Reflectivity|CREF|REFC|Radar|MRMS|"
+    r"Precip|Precipitation|APCP|QPF|Snow|Snowfall|"
+    r"CAPE|CIN|HGT"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def title_contains_variable(title: str) -> bool:
+    """Returns True if the slide title contains an atmospheric/meteorological variable name."""
+    if not title:
+        return False
+    return bool(VARIABLE_TITLE_PATTERN.search(title))
+
+
+def split_title_variable_spans(title: str) -> list[tuple[str, bool]]:
+    """Splits a title into segments of (text, is_variable).
+
+    Only variable tokens (e.g. 'T', 'T2M', 'Wind') are flagged with True so that
+    they can be highlighted in pure blue while the remaining title text stays in default color.
+    """
+    if not title:
+        return []
+    spans: list[tuple[str, bool]] = []
+    last_end = 0
+    for m in VARIABLE_TITLE_PATTERN.finditer(title):
+        if m.start() > last_end:
+            spans.append((title[last_end:m.start()], False))
+        spans.append((title[m.start():m.end()], True))
+        last_end = m.end()
+    if last_end < len(title):
+        spans.append((title[last_end:], False))
+    return spans
+
+
 
 def _lead_tag(lead: int | tuple[int, ...] | None) -> str:
     if lead is None:
@@ -373,6 +413,8 @@ def load_plan(path: Path) -> Plan:
 
 
 def _format_slide_caption(caption: str, job: PlotJob) -> str:
+    if caption.casefold() == "allz":
+        return "allz"
     m = re.match(r"^threshold_*(.+)$", caption, re.IGNORECASE)
     if not m:
         return caption
@@ -411,6 +453,16 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
         if unknown:
             raise ConfigError(f"{context}: unknown options {sorted(unknown)}; use number of rows")
         title = _text(item.get("title", candidates[0].name), f"{context}.title")
+
+        # Disambiguate candidates using the slide title when multiple variables exist in the group
+        title_words = set(re.findall(r"[a-z0-9]+", title.casefold()))
+        matching_var = [
+            job for job in candidates
+            if job.variable_tag.casefold() in title_words
+            or (job.variable and re.sub(r"[^a-z0-9]+", "", job.variable.casefold()) in title_words)
+        ]
+        slide_candidates = matching_var if matching_var and len(matching_var) < len(candidates) else candidates
+
         rows = []
         slide_parts = []
         slide_jobs = []
@@ -423,11 +475,12 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
             row_jobs = []
             for reference in references:
                 original = _text(reference, f"{context}.row{number} figure")
-                reference = original.casefold()
+                reference = original.casefold().replace("threhold", "threshold")
                 exact = []
                 exact_diff_stripped = []
                 partial = []
-                for job in candidates:
+                token_match = []
+                for job in slide_candidates:
                     path = Path(job.relative_path)
                     short = path.stem[len(job.name) + 1:]
                     statistic = re.sub(r"[^A-Za-z0-9_+-]+", "_", job.statistic or "default").strip("_")
@@ -437,12 +490,19 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
                              stem_without_var.casefold(),
                              path.relative_to(job.name).as_posix().casefold(),
                              job.variable_tag.casefold(), f"{job.variable_tag}_{statistic}".casefold()}
+                    stat_prefix = statistic + "_"
+                    if stem_without_var.casefold().startswith(stat_prefix.casefold()):
+                        names.add(stem_without_var[len(stat_prefix):].casefold())
                     if "+" in statistic:
                         for single_stat in statistic.split("+"):
                             single_stat = single_stat.strip()
                             if single_stat:
                                 names.add(short.casefold().replace(statistic.casefold(), single_stat))
                                 names.add(stem_without_var.casefold().replace(statistic.casefold(), single_stat))
+                                s_prefix = single_stat + "_"
+                                if stem_without_var.casefold().startswith(s_prefix.casefold()):
+                                    names.add(stem_without_var[len(s_prefix):].casefold())
+
                     diff_free_names = {n.replace("+diff", "") for n in names}
                     if reference in names:
                         exact.append(job)
@@ -450,10 +510,16 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
                         exact_diff_stripped.append(job)
                     elif any(reference in name for name in names | diff_free_names):
                         partial.append(job)
-                matches = exact or exact_diff_stripped or partial
+                    else:
+                        ref_tokens = set(re.findall(r"[a-z0-9]+", reference))
+                        stem_tokens = set(re.findall(r"[a-z0-9]+", short.casefold()))
+                        if ref_tokens and ref_tokens.issubset(stem_tokens):
+                            token_match.append(job)
+
+                matches = exact or exact_diff_stripped or partial or token_match
                 if len(matches) != 1:
                     detail = "ambiguous" if matches else "unknown"
-                    choices = ", ".join(job.relative_path for job in matches or candidates)
+                    choices = ", ".join(job.relative_path for job in matches or slide_candidates)
                     raise ConfigError(f"{context}.row{number}: {detail} figure {reference!r} "
                                       f"in {group!r}; use a unique reference. Figures: {choices}")
                 resolved.append(matches[0].relative_path)
@@ -471,15 +537,42 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
         use_second_section = (
             len(all_parts) > 1
             and all(len(p) >= 2 for p in all_parts)
-            and len({p[0].casefold() for p in all_parts}) == 1
-        )
-        captions = tuple(
-            tuple(
-                _format_slide_caption(p[1] if use_second_section else p[0], job)
-                for p, job in zip(parts_row, jobs_row)
+            and (
+                len({p[0].casefold() for p in all_parts}) == 1
+                or (
+                    all(len({p[0].casefold() for p in parts_row}) == 1 for parts_row in slide_parts)
+                    and len({p[1].casefold() for p in all_parts}) > 1
+                )
+                or (
+                    any(p[0].casefold().startswith("f") and p[0][1:].isdigit() for p in all_parts)
+                    and any(re.match(r"^(allz|\d+z)$", p[1].casefold()) for p in all_parts)
+                )
             )
-            for parts_row, jobs_row in zip(slide_parts, slide_jobs)
         )
+        is_profile = (
+            any(getattr(j, "plot_type", None) == "profile" for j in slide_candidates)
+            or "profile" in group.casefold()
+            or "profile" in title.casefold()
+        )
+        row_captions = []
+        for parts_row, jobs_row in zip(slide_parts, slide_jobs):
+            row_utc = [dict(j.parameters).get("Valid UTC Hour") for j in jobs_row]
+            has_varying_utc = (
+                is_profile
+                and all(u is not None for u in row_utc)
+                and len({str(u).casefold() for u in row_utc}) > 1
+            )
+            col_caps = []
+            for p, job in zip(parts_row, jobs_row):
+                if has_varying_utc:
+                    utc_val = str(dict(job.parameters).get("Valid UTC Hour"))
+                    cap = utc_val
+                else:
+                    chosen = p[1] if use_second_section else p[0]
+                    cap = _format_slide_caption(chosen, job)
+                col_caps.append(cap)
+            row_captions.append(tuple(col_caps))
+        captions = tuple(row_captions)
         slides.append(SlideSpec(candidates[0].name, title, tuple(rows), captions))
     return tuple(slides)
 

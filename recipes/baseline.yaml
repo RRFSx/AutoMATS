@@ -1,9 +1,9 @@
 # baseline recipe to generate MATS verification plots/slides.
 #   sfc_dieoff:  t2m, td2m, wind10m, rmse+bias
 #   sfc_tseries: t2m, td2m, wind10m, rmse, bias, f000, f001, f012
-#   ua_dieoff:   T, RHobT, Wind, rmse+bias
-#   ua_profile:  T, RHobT, Wind, rmse+bias, f000, f001, f003, f006, f009, f012
-#   ua_tseries:  T, RHobT, Wind, rmse+bias, f001
+#   RAOB_dieoff:   T, RHobT, Wind, rmse+bias
+#   RAOB_profile:  T, RHobT, Wind, rmse+bias, f000, f001, f003, f006, f009, f012
+#   RAOB_tseries:  T, RHobT, Wind, rmse+bias, f001
 #   radar_dieoff:      cref, csi+freq, treshold25, threshold35, threshold45
 #   ceiling_dieoff:    csi+freq, treshold500, threshold1000, threshold3000, threshold6000
 #   visibility_dieoff: csi+freq, treshold1, threshold3, threshold5, threshold10
@@ -14,13 +14,15 @@ experiments:
   short name: base4
   color: red
   COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
-- MATS name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
-  short name: 3p5km
+- MATS name: RRFSv2_conus_3km_ret_v2x_retv5
+  short name: base5
   color: blue
-  COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
+  COMROOT: /gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2.retv5/com/rrfs/v2.1.4
 - MATS name: HRRR_OPS
+  short name: HRRR
   color: orange
 #- MATS name: RRFS_A
+#  short name: RRFSA
 #  color: "#5F5F5F"
 
 pygraf graphics slides:
@@ -47,7 +49,7 @@ automation:
 # ======================================= plot groups  =============================================
 plots:
 - name: sfc_dieoff
-  application: "surface"
+  application: "Surface (METAR)"
   truth: "METAR"
   plot_type: dieoff
   region: "All HRRR domain"
@@ -55,54 +57,87 @@ plots:
   statistic: [rmse+bias]
 
 - name: sfc_tseries
-  application: "surface"
+  application: "Surface (METAR)"
   truth: "METAR"
   plot_type: "time series"
   region: "All HRRR domain"
   variable: [t2m, td2m, wind10m]
-  statistic: [rmse, bias]
-  forecast lead time: [0, 1, 12]
+  statistic: [rmse+bias]
+  forecast lead time: [0, 1, 12, 24]
   #Difference curves: "Diff all curves against the 1st added curve"
 
-- name: ua_dieoff
+- name: ROAB_dieoff
   application: "Upper Air"
   plot_type: dieoff
   truth: "RAOBs (Traditional)"
   region: "HRRR domain"
   matched_samples: true
+  Valid UTC Hour: [all, 0z, 12z]
   variable: [T, RHobT, Wind]
   statistic: [rmse+bias]
 
-- name: ua_profile
+- name: ROAB_profile
   application: "Upper Air"
   plot_type: profile
   truth: "RAOBs (Traditional)"
   region: "HRRR domain"
   matched_samples: true
+  Valid UTC Hour: [all, 0z, 12z]
   variable: [T, RHobT, Wind]
   statistic: [rmse+bias]
-  forecast lead time: [0, 1, 3, 6, 9, 12]
+  forecast lead time: [0, 1, 3, 6, 12, 24]
 
-- name: ua_tseries
+- name: ROAB_tseries
   application: "Upper Air"
   plot_type: "time series"
   truth: "RAOBs (Traditional)"
   region: "HRRR domain"
   matched_samples: true
-  variable: [T]
+  variable: [T, RHobT, Wind]
   statistic: [rmse+bias]
-  forecast lead time: [1]
+  forecast lead time: [0, 1, 3, 6, 12, 24]
+
+- name: AMDAR_dieoff
+  application: "Upper Air"
+  plot_type: dieoff
+  truth: "RAOBs (Traditional)"
+  region: "HRRR domain"
+  matched_samples: true
+  Valid UTC Hour: [all, 0z, 12z]
+  variable: [T, RHobT, Wind]
+  statistic: [rmse+bias]
+
+- name: AMDAR_profile
+  application: "Upper Air"
+  plot_type: profile
+  truth: "RAOBs (Traditional)"
+  region: "HRRR domain"
+  matched_samples: true
+  Valid UTC Hour: [all, 0z, 12z]
+  variable: [T, RHobT, Wind]
+  statistic: [rmse+bias]
+  forecast lead time: [0, 1, 3, 6, 12, 24]
+
+- name: AMDAR_tseries
+  application: "Upper Air"
+  plot_type: "time series"
+  truth: "RAOBs (Traditional)"
+  region: "HRRR domain"
+  matched_samples: true
+  variable: [T, RHobT, Wind]
+  statistic: [rmse+bias]
+  forecast lead time: [0, 1, 3, 6, 12, 24]
 
 - name: radar_dieoff
-  exclude experiment: [HRRR_OPS]
+  #exclude experiment: [HRRR_OPS]
   application: "Radar (MRMS)"
   plot_type: "die off"
   region: "Continental US"
   matched_samples: true
   variable: ["Composite Reflectivity"]
-  Threshold: [25, 35, 45]
-  statistic: [CSI, Bias]
-  Difference curves: "Diff all curves against the 1st added curve"
+  Threshold: [15, 25, 35, 45]
+  statistic: [CSI+Bias]
+  #Difference curves: "Diff all curves against the 1st added curve"
 
 - name: ceiling_dieoff
   application: "Ceiling and Visibility"
@@ -111,8 +146,8 @@ plots:
   matched_samples: true
   variable: ["ceiling"]
   Threshold: [500, 1000, 3000, 6000]
-  statistic: [CSI, BIAS]
-  Difference curves: "Diff all curves against the 1st added curve"
+  statistic: [CSI+BIAS]
+  #Difference curves: "Diff all curves against the 1st added curve"
 
 - name: visibility_dieoff
   application: "Ceiling and Visibility"
@@ -121,8 +156,8 @@ plots:
   matched_samples: true
   variable: ["visibility"]
   Threshold: [1, 3, 5, 10]
-  statistic: [CSI, BIAS]
-  Difference curves: "Diff all curves against the 1st added curve"
+  statistic: [CSI+ BIAS]
+  #Difference curves: "Diff all curves against the 1st added curve"
 
 
 # ======================================= MATS slides  =============================================
@@ -135,59 +170,64 @@ slides:
   row2: [wind10m]
 
 - plot group: sfc_tseries
-  title: Surface Time Series RMSE f000h
+  title: T2M Time Series RMSE+BIAS
   number of rows: 2
-  row1: [t2m_rmse_f000, td2m_rmse_f000]
-  row2: [wind10m_rmse_f000]
+  row1: [f000, f001]
+  row2: [f012, f024]
 
 - plot group: sfc_tseries
-  title: Surface Time Series Bias f000h
+  title: Td2M Time Series RMSE+BIAS
   number of rows: 2
-  row1: [t2m_bias_f000, td2m_bias_f000]
-  row2: [wind10m_bias_f000]
+  row1: [f000, f001]
+  row2: [f012, f024]
 
 - plot group: sfc_tseries
-  title: Surface Time Series RMSE f001h
+  title: Wind10m Time Series RMSE+BIAS
   number of rows: 2
-  row1: [t2m_rmse_f001, td2m_rmse_f001]
-  row2: [wind10m_rmse_f001]
+  row1: [f000, f001]
+  row2: [f012, f024]
 
-- plot group: sfc_tseries
-  title: Surface Time Series Bias f001h
+# -----  RAOB slides ------
+- plot group: RAOB_dieoff
+  title: T RAOB Dieoff
   number of rows: 2
-  row1: [t2m_bias_f001, td2m_bias_f001]
-  row2: [wind10m_bias_f001]
+  row1: [all]
+  row2: [0z, 12z]
 
-# -----  upper air slides ------
-- plot group: ua_dieoff
-  title: Upper Air Dieoff
+- plot group: RAOB_dieoff
+  title: RHobT RAOB Dieoff
   number of rows: 2
-  row1: [T, RHobT]
-  row2: [Wind]
+  row1: [all]
+  row2: [0z, 12z]
 
-- plot group: ua_profile
-  title: Upper Air Profile f000, f001
+- plot group: RAOB_dieoff
+  title: Wind RAOB Dieoff
   number of rows: 2
-  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
-  row2: [T_rmse+bias_f001, RHobT_rmse+bias_f001, Wind_rmse+bias_f001]
+  row1: [all]
+  row2: [0z, 12z]
 
-- plot group: ua_profile
-  title: Upper Air Profile f003, f006
+- plot group: RAOB_profile
+  title: T ROAB Profile f000, f001
   number of rows: 2
-  row1: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]
-  row2: [T_rmse+bias_f006, RHobT_rmse+bias_f006, Wind_rmse+bias_f006]
+  row1: [all_f000, 0z_f000, 12z_f000]
+  row2: [all_f001, 0z_f001, 12z_f001]
 
-- plot group: ua_profile
-  title: Upper Air Profile f009, f012
+- plot group: RAOB_profile
+  title: RHobT ROAB Profile f000, f001
   number of rows: 2
-  row1: [T_rmse+bias_f009, RHobT_rmse+bias_f009, Wind_rmse+bias_f009]
-  row2: [T_rmse+bias_f012, RHobT_rmse+bias_f012, Wind_rmse+bias_f012]
+  row1: [all_f000, 0z_f000, 12z_f000]
+  row2: [all_f001, 0z_f001, 12z_f001]
 
-- plot group: ua_tseries
+- plot group: RAOB_profile
+  title: Wind ROAB Profile f000, f001
+  number of rows: 2
+  row1: [all_f000, 0z_f000, 12z_f000]
+  row2: [all_f001, 0z_f001, 12z_f001]
+
+- plot group: RAOB_tseries
   title: Upper Air Time Series RMSE+Bias f001h
   number of rows: 1
   row1: [T_rmse+bias_f001]
-
 
 # -----  radar slides ------
 - plot group: radar_dieoff

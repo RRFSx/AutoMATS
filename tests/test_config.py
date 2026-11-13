@@ -208,6 +208,35 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(plan.slides[0].rows,
                          (("cref_dieoff/cref_dieoff_composite_reflectivity_csi_threshold25.png",),))
 
+    def test_csi_plus_bias_statistic_group_and_slide_matching(self):
+        raw = example()
+        raw["plots"] = [{
+            "name": "radar_dieoff", "application": "Radar (MRMS)",
+            "plot_type": "die off", "region": "Continental US",
+            "variable": ["Composite Reflectivity"], "Threshold": [25, 35],
+            "statistic": ["CSI+Bias"]
+        }]
+        raw["slides"] = [
+            {"plot group": "radar_dieoff", "title": "CSI", "number of rows": 1, "row1": ["csi_threshold25"]},
+            {"plot group": "radar_dieoff", "title": "BIAS", "number of rows": 1, "row1": ["bias_threshold35"]},
+        ]
+        plan = build_plan(raw)
+        self.assertEqual(len(plan.jobs), 2)
+        job = plan.jobs[0]
+        self.assertEqual(job.statistic, "csi+bias")
+        self.assertEqual(job.statistics, ("csi", "bias"))
+        self.assertEqual(len(job.curves), 4)
+        self.assertEqual(job.curves[0].statistic, "csi")
+        self.assertEqual(job.curves[0].dash, "solid")
+        self.assertEqual(job.curves[1].statistic, "bias")
+        self.assertEqual(job.curves[1].dash, "dash")
+        self.assertEqual(job.curves[2].statistic, "csi")
+        self.assertEqual(job.curves[3].statistic, "bias")
+        self.assertEqual(plan.slides[0].rows,
+                         (("radar_dieoff/radar_dieoff_composite_reflectivity_csi+bias_threshold25.png",),))
+        self.assertEqual(plan.slides[1].rows,
+                         (("radar_dieoff/radar_dieoff_composite_reflectivity_csi+bias_threshold35.png",),))
+
     def test_filename_omits_unspecified_lead_but_keeps_explicit_zero(self):
         raw = example()
         raw["plots"][0].update({"name": "ua_dieoff", "plot_type": "dieoff",

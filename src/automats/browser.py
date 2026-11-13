@@ -82,7 +82,12 @@ def figure_header(job: PlotJob, effective: dict | None = None) -> list[str]:
                   curve.get("truth", curve.get("database", "")), curve.get("region", ""),
                   curve.get("variable", ""), curve.get("statistic", "")]
         if len(job.statistics) > 1:
-            fields[-1] = "RMSE (solid) + BIAS (dashed)"
+            if "rmse" in job.statistics and "bias" in job.statistics:
+                fields[-1] = "RMSE (solid) + BIAS (dashed)"
+            elif "csi" in job.statistics and "bias" in job.statistics:
+                fields[-1] = "CSI (solid) + BIAS (dashed)"
+            else:
+                fields[-1] = " + ".join(str(s).upper() for s in job.statistics)
         if job.lead is not None:
             fields.insert(2, job.lead_tag + "h")
         plot_type = str(effective.get("plot_type") or "").strip()
@@ -93,7 +98,15 @@ def figure_header(job: PlotJob, effective: dict | None = None) -> list[str]:
             if parameter in curve:
                 fields.append(f"{parameter}={curve[parameter]}")
         return [", ".join(str(field) for field in fields if field != "")]
-    statistic = "RMSE (solid) + BIAS (dashed)" if len(job.statistics) > 1 else (job.statistic or "default").upper()
+    if len(job.statistics) > 1:
+        if "rmse" in job.statistics and "bias" in job.statistics:
+            statistic = "RMSE (solid) + BIAS (dashed)"
+        elif "csi" in job.statistics and "bias" in job.statistics:
+            statistic = "CSI (solid) + BIAS (dashed)"
+        else:
+            statistic = " + ".join(str(s).upper() for s in job.statistics)
+    else:
+        statistic = (job.statistic or "default").upper()
     lead = f", {job.lead_tag}h" if job.lead is not None else ""
     return [
         f"{start} - {end}{lead}, {job.truth}, {job.region}, "
@@ -662,6 +675,10 @@ class UpperAirBrowser:
             "diff_curves": "plotFormat",
             "diff": "plotFormat",
             "difference": "plotFormat",
+            "valid utc hour": "valid-time",
+            "valid_utc_hour": "valid-time",
+            "valid hour": "valid-time",
+            "utc hour": "valid-time",
         }
         if self.application == "upperair":
             aliases["truth"] = "database"
@@ -708,6 +725,17 @@ class UpperAirBrowser:
                     "diff pairwise": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
                     "diff the 1st and 2nd curves, 3rd and 4th, etc": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
                 }
+            elif name == "valid-time":
+                # Map user-friendly values to MATS option values.
+                # 'all' / 'unused' → no hour filter; 'Nz' / 'N' → UTC hour N.
+                aliases = {"all": "unused", "unused": "unused",
+                           **{f"{h}z": str(h) for h in range(24)}}
+                # Real MATS valid-time dropdowns often list only numeric hours (0–23) with
+                # no 'unused' option.  When the user requested 'all' and 'unused' is absent,
+                # skip setting the parameter — the MATS default already includes all hours.
+                target = aliases.get(requested.casefold(), requested)
+                if target == "unused" and not any(opt["value"] == "unused" for opt in options):
+                    return self.expected.get(name)
             candidates = [option["value"] for option in options]
             try:
                 selected = resolve_option(requested, candidates, name, aliases)

@@ -28,8 +28,14 @@ class ConfigError(ValueError):
 VARIABLES = {"temperature": ("Temperature", "T"), "t": ("Temperature", "T"),
              "rhobt": ("RHobT", "RHobT"), "rh": ("RH", "RH"),
              "wind": ("Wind", "Wind")}
-STATISTICS = {"rmse": "RMSE", "bias": "Bias (Model - Obs)"}
-STATISTIC_GROUPS = {"rmse": ("rmse",), "bias": ("bias",), "rmse+bias": ("rmse", "bias")}
+STATISTICS = {"rmse": "RMSE", "bias": "Bias (Model - Obs)", "csi": "CSI"}
+STATISTIC_GROUPS = {
+    "rmse": ("rmse",),
+    "bias": ("bias",),
+    "rmse+bias": ("rmse", "bias"),
+    "csi": ("csi",),
+    "csi+bias": ("csi", "bias"),
+}
 LEAD_COLORS = ("red", "blue", "green", "orange", "magenta", "teal", "black")
 DEFAULT_DESCRIPTION_FONT_SIZE = 24
 DEFAULT_LEGEND_FONT_SIZE = 28
@@ -314,6 +320,17 @@ def _is_diff_curve_enabled(value: Any) -> bool:
     return norm not in {"none", "false", "0", "no"}
 
 
+def _is_valid_utc_hour_param(param_name: str) -> bool:
+    """Returns True when the parameter selects the Valid UTC Hour (valid-time) filter.
+
+    Recognised spellings: 'Valid UTC Hour', 'valid_utc_hour', 'valid hour', 'utc hour'.
+    When True, only the *value* (e.g. 'all', '0z', '12z') is used as the filename token
+    instead of the usual 'key+value' concatenation.
+    """
+    norm = re.sub(r"[\s_-]+", "", param_name.casefold())
+    return norm in {"validutchour", "validhour", "utchour"}
+
+
 def _safe_name(value: Any, context: str) -> str:
     value = _text(value, context)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", value):
@@ -382,7 +399,8 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
         context = f"slide {index}"
         item = _mapping(item, context)
         group = _text(item.get("plot group"), f"{context}.plot group")
-        candidates = [job for job in jobs if job.name.casefold() == group.casefold()]
+        norm_group = lambda g: g.casefold().replace("roab", "raob")
+        candidates = [job for job in jobs if norm_group(job.name) == norm_group(group)]
         if not candidates:
             raise ConfigError(f"{context}: unknown plot group {group!r}")
         count = item.get("number of rows")
@@ -419,6 +437,12 @@ def _slides(raw: Any, jobs: tuple[PlotJob, ...]) -> tuple[SlideSpec, ...]:
                              stem_without_var.casefold(),
                              path.relative_to(job.name).as_posix().casefold(),
                              job.variable_tag.casefold(), f"{job.variable_tag}_{statistic}".casefold()}
+                    if "+" in statistic:
+                        for single_stat in statistic.split("+"):
+                            single_stat = single_stat.strip()
+                            if single_stat:
+                                names.add(short.casefold().replace(statistic.casefold(), single_stat))
+                                names.add(stem_without_var.casefold().replace(statistic.casefold(), single_stat))
                     diff_free_names = {n.replace("+diff", "") for n in names}
                     if reference in names:
                         exact.append(job)
@@ -645,7 +669,7 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
             if statistic is None:
                 stats.append(None)
                 continue
-            key = _text(statistic, "statistic").casefold()
+            key = re.sub(r"\s+", "", _text(statistic, "statistic").casefold())
             stats.append(key)
         if "forecast lead time" in item and "forecast_lead_time" in item:
             raise ConfigError("Use only one forecast lead time spelling")
@@ -665,6 +689,14 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
                     if _is_diff_curve_param(parameter):
                         if _is_diff_curve_enabled(value) and "+diff" not in statistic_tag:
                             statistic_tag = f"{statistic_tag}+diff"
+                        continue
+                    if _is_valid_utc_hour_param(parameter):
+                        # Use only the value (e.g. 'all', '0z', '12z') as the filename token,
+                        # omitting the parameter key so slide references stay short and readable.
+                        value_tag = re.sub(r"[^a-z0-9.+-]+", "_", str(value).strip().casefold()).strip("_")
+                        if not value_tag:
+                            raise ConfigError(f"Cannot create a readable filename for {parameter!r}={value!r}")
+                        parameter_tags.append(value_tag)
                         continue
                     key_tag = re.sub(r"[^a-z0-9]+", "", parameter.casefold())
                     value_tag = re.sub(r"[^a-z0-9.+-]+", "_", str(value).strip().casefold()).strip("_")

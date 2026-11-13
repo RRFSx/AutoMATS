@@ -11,6 +11,8 @@ from automats.config import (
     build_plan,
     copy_used_recipes,
     load_plan,
+    split_title_variable_spans,
+    title_contains_variable,
 )
 
 
@@ -207,6 +209,35 @@ class ConfigTests(unittest.TestCase):
             for statistic in ("csi", "bias") for threshold in (25, 35, 45)})
         self.assertEqual(plan.slides[0].rows,
                          (("cref_dieoff/cref_dieoff_composite_reflectivity_csi_threshold25.png",),))
+
+    def test_csi_plus_bias_statistic_group_and_slide_matching(self):
+        raw = example()
+        raw["plots"] = [{
+            "name": "radar_dieoff", "application": "Radar (MRMS)",
+            "plot_type": "die off", "region": "Continental US",
+            "variable": ["Composite Reflectivity"], "Threshold": [25, 35],
+            "statistic": ["CSI+Bias"]
+        }]
+        raw["slides"] = [
+            {"plot group": "radar_dieoff", "title": "CSI", "number of rows": 1, "row1": ["csi_threshold25"]},
+            {"plot group": "radar_dieoff", "title": "BIAS", "number of rows": 1, "row1": ["bias_threshold35"]},
+        ]
+        plan = build_plan(raw)
+        self.assertEqual(len(plan.jobs), 2)
+        job = plan.jobs[0]
+        self.assertEqual(job.statistic, "csi+bias")
+        self.assertEqual(job.statistics, ("csi", "bias"))
+        self.assertEqual(len(job.curves), 4)
+        self.assertEqual(job.curves[0].statistic, "csi")
+        self.assertEqual(job.curves[0].dash, "solid")
+        self.assertEqual(job.curves[1].statistic, "bias")
+        self.assertEqual(job.curves[1].dash, "dash")
+        self.assertEqual(job.curves[2].statistic, "csi")
+        self.assertEqual(job.curves[3].statistic, "bias")
+        self.assertEqual(plan.slides[0].rows,
+                         (("radar_dieoff/radar_dieoff_composite_reflectivity_csi+bias_threshold25.png",),))
+        self.assertEqual(plan.slides[1].rows,
+                         (("radar_dieoff/radar_dieoff_composite_reflectivity_csi+bias_threshold35.png",),))
 
     def test_filename_omits_unspecified_lead_but_keeps_explicit_zero(self):
         raw = example()
@@ -887,6 +918,64 @@ class ConfigTests(unittest.TestCase):
             copied2 = copy_used_recipes(load_plan(disabled_recipe), out_dir2)
             self.assertEqual(copied2, (out_dir2 / "no_gfx.yaml",))
             self.assertFalse((out_dir2 / "gfx_layout.yaml").exists())
+
+    def test_title_contains_variable(self):
+        self.assertTrue(title_contains_variable("T2M Time Series RMSE+BIAS"))
+        self.assertTrue(title_contains_variable("Td2M Time Series RMSE+BIAS"))
+        self.assertTrue(title_contains_variable("Wind10m Time Series RMSE+BIAS"))
+        self.assertTrue(title_contains_variable("T RAOB Dieoff"))
+        self.assertTrue(title_contains_variable("RHobT RAOB Dieoff"))
+        self.assertTrue(title_contains_variable("Wind RAOB Dieoff"))
+        self.assertTrue(title_contains_variable("T ROAB Profile f000, f001"))
+        self.assertTrue(title_contains_variable("RADAR MRMS Dieoff CSI and Bias"))
+        self.assertTrue(title_contains_variable("Ceiling Dieoff CSI and Bias"))
+        self.assertTrue(title_contains_variable("Visibility Dieoff CSI and Bias"))
+        self.assertTrue(title_contains_variable("Composite Reflectivity"))
+        self.assertFalse(title_contains_variable("Surface Dieoff"))
+        self.assertFalse(title_contains_variable("Model Verification Overview"))
+        self.assertFalse(title_contains_variable(""))
+
+        self.assertEqual(
+            split_title_variable_spans("T RAOB Dieoff"),
+            [("T", True), (" RAOB Dieoff", False)],
+        )
+        self.assertEqual(
+            split_title_variable_spans("T2M Time Series RMSE+BIAS"),
+            [("T2M", True), (" Time Series RMSE+BIAS", False)],
+        )
+        self.assertEqual(
+            split_title_variable_spans("Surface Dieoff"),
+            [("Surface Dieoff", False)],
+        )
+
+    def test_profile_slides_label_valid_utc_hours(self):
+        raw = example()
+        raw["plots"] = [{
+            "name": "ROAB_profile",
+            "application": "Upper Air",
+            "plot_type": "profile",
+            "truth": "RAOBs (Traditional)",
+            "region": "HRRR domain",
+            "matched_samples": True,
+            "variable": ["Temperature"],
+            "statistic": ["rmse+bias"],
+            "forecast lead time": [0, 1],
+            "Valid UTC Hour": ["allz", "0z", "12z"],
+        }]
+        raw["slides"] = [{
+            "plot group": "ROAB_profile",
+            "title": "T ROAB Profile f000, f001",
+            "number of rows": 2,
+            "row1": ["f000_allz", "f000_0z", "f000_12z"],
+            "row2": ["f001_allz", "f001_0z", "f001_12z"],
+        }]
+        plan = build_plan(raw)
+        self.assertEqual(len(plan.slides), 1)
+        self.assertEqual(
+            plan.slides[0].captions,
+            (("allz", "0z", "12z"), ("allz", "0z", "12z")),
+        )
+
 
 
 if __name__ == "__main__":

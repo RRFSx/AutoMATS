@@ -34,7 +34,7 @@ try:
 except ImportError:
     yaml = None
 
-from automats.config import Experiment, Plan
+from automats.config import Experiment, Plan, title_contains_variable, split_title_variable_spans
 
 ORDINALS = {
     "first": 0, "1st": 0, "1": 0,
@@ -1322,10 +1322,26 @@ def process_graphics_slides(
         heading.text_frame.margin_left = heading.text_frame.margin_right = 0
 
         p1 = heading.text_frame.paragraphs[0]
-        p1.text = title_line1
+        p1.text = ""
         p1.alignment = PP_ALIGN.CENTER
-        p1.font.size = Pt(19)
-        p1.font.bold = True
+        spans = split_title_variable_spans(title_line1)
+        if spans:
+            for span_text, is_var in spans:
+                run = p1.add_run()
+                run.text = span_text
+                run.font.size = Pt(19)
+                run.font.bold = True
+                if is_var:
+                    try:
+                        from pptx.dml.color import RGBColor
+                        run.font.color.rgb = RGBColor(0, 0, 255)
+                    except Exception:
+                        pass
+        else:
+            run = p1.add_run()
+            run.text = title_line1
+            run.font.size = Pt(19)
+            run.font.bold = True
 
         p2 = heading.text_frame.add_paragraph()
         p2.alignment = PP_ALIGN.CENTER

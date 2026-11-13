@@ -82,7 +82,12 @@ def figure_header(job: PlotJob, effective: dict | None = None) -> list[str]:
                   curve.get("truth", curve.get("database", "")), curve.get("region", ""),
                   curve.get("variable", ""), curve.get("statistic", "")]
         if len(job.statistics) > 1:
-            fields[-1] = "RMSE (solid) + BIAS (dashed)"
+            if "rmse" in job.statistics and "bias" in job.statistics:
+                fields[-1] = "RMSE (solid) + BIAS (dashed)"
+            elif "csi" in job.statistics and "bias" in job.statistics:
+                fields[-1] = "CSI (solid) + BIAS (dashed)"
+            else:
+                fields[-1] = " + ".join(str(s).upper() for s in job.statistics)
         if job.lead is not None:
             fields.insert(2, job.lead_tag + "h")
         plot_type = str(effective.get("plot_type") or "").strip()
@@ -93,7 +98,15 @@ def figure_header(job: PlotJob, effective: dict | None = None) -> list[str]:
             if parameter in curve:
                 fields.append(f"{parameter}={curve[parameter]}")
         return [", ".join(str(field) for field in fields if field != "")]
-    statistic = "RMSE (solid) + BIAS (dashed)" if len(job.statistics) > 1 else (job.statistic or "default").upper()
+    if len(job.statistics) > 1:
+        if "rmse" in job.statistics and "bias" in job.statistics:
+            statistic = "RMSE (solid) + BIAS (dashed)"
+        elif "csi" in job.statistics and "bias" in job.statistics:
+            statistic = "CSI (solid) + BIAS (dashed)"
+        else:
+            statistic = " + ".join(str(s).upper() for s in job.statistics)
+    else:
+        statistic = (job.statistic or "default").upper()
     lead = f", {job.lead_tag}h" if job.lead is not None else ""
     return [
         f"{start} - {end}{lead}, {job.truth}, {job.region}, "
@@ -471,10 +484,25 @@ RESET_CONTROLS = """async () => {
 PLOT_STATUS = """() => {
     const error = Session.get('errorMessage');
     if (error) return {error};
+    for (const modal of document.querySelectorAll('.modal, [role="dialog"]')) {
+        const style = window.getComputedStyle(modal);
+        if (style.display !== 'none' && style.visibility !== 'hidden' &&
+            (modal.offsetParent !== null || modal.classList.contains('show') || modal.classList.contains('in'))) {
+            const body = (modal.querySelector('.modal-body') || modal.querySelector('.modal-content') || modal).innerText?.trim();
+            if (body) {
+                try {
+                    const btn = modal.querySelector('[data-dismiss="modal"], .modal-footer button, .modal-header button, button');
+                    if (btn) btn.click();
+                } catch (e) {}
+                return {error: body.replace(/\\s+/g, ' ')};
+            }
+        }
+    }
+    const result = (typeof matsCurveUtils !== 'undefined' && matsCurveUtils.getGraphResult) ? matsCurveUtils.getGraphResult() : null;
+    if (result?.error) return {error: result.error};
     const graph = document.getElementById('placeholder');
     const key = Session.get('plotResultKey');
-    const result = matsCurveUtils.getGraphResult();
-    if (!key || !result.data || !graph?.data || !graph._fullLayout ||
+    if (!key || !result?.data || !graph?.data || !graph._fullLayout ||
         graph.getBoundingClientRect().width < 100 ||
         document.getElementById('spinner')?.style.display !== 'none') return false;
     return {key};
@@ -571,7 +599,11 @@ class UpperAirBrowser:
         self.added_curve_specs = []
         if self.page is not None and not self.page.is_closed():
             try:
-                self.page.evaluate("() => { if (typeof Session !== 'undefined') Session.set('errorMessage', ''); }")
+                self.page.evaluate("""() => {
+                    if (typeof Session !== 'undefined') Session.set('errorMessage', '');
+                    document.querySelectorAll('.modal button, [data-dismiss="modal"]').forEach(b => { try { b.click(); } catch(e){} });
+                    document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+                }""")
             except Exception:
                 pass
 
@@ -605,7 +637,25 @@ class UpperAirBrowser:
     def _error(self) -> None:
         if self.network_error:
             raise self.network_error
-        error = self.page.evaluate("() => Session.get('errorMessage') || ''")
+        error = self.page.evaluate("""() => {
+            const err = (typeof Session !== 'undefined' && Session.get('errorMessage')) || '';
+            if (err) return err;
+            for (const modal of document.querySelectorAll('.modal, [role="dialog"]')) {
+                const style = window.getComputedStyle(modal);
+                if (style.display !== 'none' && style.visibility !== 'hidden' &&
+                    (modal.offsetParent !== null || modal.classList.contains('show') || modal.classList.contains('in'))) {
+                    const body = (modal.querySelector('.modal-body') || modal.querySelector('.modal-content') || modal).innerText?.trim();
+                    if (body) {
+                        try {
+                            const btn = modal.querySelector('[data-dismiss="modal"], .modal-footer button, .modal-header button, button');
+                            if (btn) btn.click();
+                        } catch (e) {}
+                        return body.replace(/\\s+/g, ' ');
+                    }
+                }
+            }
+            return '';
+        }""")
         if error:
             raise RunError(f"MATS: {error}")
 
@@ -662,6 +712,10 @@ class UpperAirBrowser:
             "diff_curves": "plotFormat",
             "diff": "plotFormat",
             "difference": "plotFormat",
+            "valid utc hour": "valid-time",
+            "valid_utc_hour": "valid-time",
+            "valid hour": "valid-time",
+            "utc hour": "valid-time",
         }
         if self.application == "upperair":
             aliases["truth"] = "database"
@@ -687,6 +741,21 @@ class UpperAirBrowser:
                 aliases = VARIABLE_ALIASES
             elif name == "variable" and self.application == "upperair":
                 aliases = {key: label for key, (label, tag) in VARIABLES.items()}
+            elif name == "database":
+                aliases = {
+                    "raob": "RAOBs (Traditional)",
+                    "raobs": "RAOBs (Traditional)",
+                    "raobs (traditional)": "RAOBs (Traditional)",
+                    "amdar": "AMDAR (Traditional)",
+                    "amdar (traditional)": "AMDAR (Traditional)",
+                    "amdar traditional": "AMDAR (Traditional)",
+                    "aircraft": "AMDAR (Traditional)",
+                }
+            elif name == "region" and self.application == "upperair":
+                aliases = {
+                    "full domain": "Full model domain",
+                    "all hrrr domain": "HRRR domain",
+                }
             elif name == "statistic" and self.application in {"surface", "upperair"}:
                 aliases = STATISTICS
             elif name == "threshold" and str(self.expected.get("variable", "")).lower() in {"visibility", "vis"}:
@@ -708,6 +777,17 @@ class UpperAirBrowser:
                     "diff pairwise": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
                     "diff the 1st and 2nd curves, 3rd and 4th, etc": "Diff the 1st and 2nd curves, 3rd and 4th, etc",
                 }
+            elif name == "valid-time":
+                # Map user-friendly values to MATS option values.
+                # 'allz' / 'unused' → no hour filter; 'Nz' / 'N' → UTC hour N.
+                aliases = {"allz": "unused", "unused": "unused",
+                           **{f"{h}z": str(h) for h in range(24)}}
+                # Real MATS valid-time dropdowns often list only numeric hours (0–23) with
+                # no 'unused' option.  When the user requested 'allz' and 'unused' is absent,
+                # skip setting the parameter — the MATS default already includes all hours.
+                target = aliases.get(requested.casefold(), requested)
+                if target == "unused" and not any(opt["value"] == "unused" for opt in options):
+                    return self.expected.get(name)
             candidates = [option["value"] for option in options]
             try:
                 selected = resolve_option(requested, candidates, name, aliases)
@@ -897,10 +977,15 @@ class UpperAirBrowser:
                                          if name in snapshot["curveParams"]})
                 self.page.locator("#add").click()
                 self.page.wait_for_function("""count => (Session.get('Curves') || []).length === count ||
-                    !!Session.get('errorMessage')""", arg=len(requested_curves), polling=250)
+                    !!Session.get('errorMessage') ||
+                    Array.from(document.querySelectorAll('.modal, [role="dialog"]')).some(m => {
+                        const s = window.getComputedStyle(m);
+                        return s.display !== 'none' && s.visibility !== 'hidden' && (m.offsetParent !== null || m.classList.contains('show') || m.classList.contains('in'));
+                    })""", arg=len(requested_curves), polling=250)
                 self._settle_controls()
                 curves_after = self.page.evaluate("() => Session.get('Curves') || []")
                 if len(curves_after) != len(requested_curves):
+                    self._error()
                     mats_err = self.page.evaluate("() => Session.get('errorMessage') || ''")
                     default_curves.pop()
                     requested_curves.pop()

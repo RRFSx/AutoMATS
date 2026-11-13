@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+import tempfile
 from unittest.mock import MagicMock
 
 from automats.config import Experiment, PlotJob, Plan, SlideSpec
@@ -636,6 +637,58 @@ class SlideDeduplicationHelpersTests(unittest.TestCase):
         self.assertLessEqual(mid_2_3["left"] + mid_2_3["layout"]["width"], Inches(9.62))
         cy = mid_2_3["top"] + mid_2_3["layout"]["height"] / 2
         self.assertAlmostEqual(cy, grid_mid_y, delta=Inches(0.2))
+
+    def test_build_slides_applies_pure_blue_to_variable_titles_and_utc_captions(self):
+        from pptx import Presentation
+        from pptx.dml.color import RGBColor
+        from automats.slides import build_slides
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            img_path = tmp / "ROAB_profile_T_rmse+bias_f000_allz.png"
+            im = Image.new("RGB", (100, 100), color="white")
+            im.save(img_path, format="PNG")
+
+            slide_var = SlideSpec(
+                plot_group="ROAB_profile",
+                title="T ROAB Profile f000, f001",
+                rows=((img_path.name,),),
+                captions=(("allz",),),
+            )
+            slide_nonvar = SlideSpec(
+                plot_group="sfc_dieoff",
+                title="Surface Dieoff",
+                rows=((img_path.name,),),
+                captions=(("t2m",),),
+            )
+            plan = Plan(
+                jobs=(),
+                warnings=(),
+                settings=MagicMock(),
+                experiments=(),
+                slides=(slide_var, slide_nonvar),
+            )
+            dest = build_slides(plan, tmp)
+            prs = Presentation(dest)
+            # Slide 0 is overview, Slide 1 is T ROAB Profile, Slide 2 is Surface Dieoff
+            s1 = prs.slides[1]
+            title_p1 = [s for s in s1.shapes if s.has_text_frame and s.text_frame.text == "T ROAB Profile f000, f001"][0].text_frame.paragraphs[0]
+            self.assertEqual(len(title_p1.runs), 2)
+            self.assertEqual(title_p1.runs[0].text, "T")
+            self.assertEqual(title_p1.runs[0].font.color.rgb, RGBColor(0, 0, 255))
+            self.assertEqual(title_p1.runs[1].text, " ROAB Profile f000, f001")
+            self.assertIsNone(title_p1.runs[1].font.color.type)
+
+            captions_s1 = [s.text_frame.text for s in s1.shapes if s.name.startswith("Caption ")]
+            self.assertEqual(captions_s1, ["allz"])
+
+            s2 = prs.slides[2]
+            title_p2 = [s for s in s2.shapes if s.has_text_frame and s.text_frame.text == "Surface Dieoff"][0].text_frame.paragraphs[0]
+            self.assertEqual(len(title_p2.runs), 1)
+            self.assertEqual(title_p2.runs[0].text, "Surface Dieoff")
+            self.assertIsNone(title_p2.runs[0].font.color.type)
+
 
 
 if __name__ == "__main__":

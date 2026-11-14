@@ -234,12 +234,19 @@ class TestMRMS(unittest.TestCase):
         self.assertEqual(res_single, [datetime(2024, 5, 7, 6, 0)])
 
         # extract_obs_from_recipe
-        recipe_path = Path(__file__).resolve().parent.parent / "recipes" / "graphics_slides_layout2_May2024.yaml"
+        recipe_path = Path(__file__).resolve().parent.parent / "recipes" / "pygraf_slides_layout2_May2024.yaml"
         tasks = mod.extract_obs_from_recipe(recipe_path)
-        self.assertEqual(len(tasks), 3)
-        self.assertEqual(tasks[0]["valid_dt"], datetime(2024, 5, 7, 6, 0))
-        self.assertEqual(tasks[1]["valid_dt"], datetime(2024, 5, 7, 1, 0))
-        self.assertEqual(tasks[2]["valid_dt"], datetime(2024, 5, 7, 2, 0))
+        self.assertEqual(len(tasks), 10)
+        self.assertEqual(tasks[0]["valid_dt"], datetime(2024, 5, 8, 0, 0))
+        self.assertEqual(tasks[0]["tile"], "NE")
+        self.assertEqual(tasks[2]["valid_dt"], datetime(2024, 5, 8, 22, 0))
+        self.assertEqual(tasks[2]["tile"], "SE")
+        self.assertEqual(tasks[6]["valid_dt"], datetime(2024, 5, 7, 1, 0))
+        self.assertEqual(tasks[6]["tile"], "full")
+        self.assertEqual(tasks[8]["valid_dt"], datetime(2024, 5, 10, 11, 0))
+        self.assertEqual(tasks[8]["tile"], "full")
+        self.assertEqual(tasks[9]["valid_dt"], datetime(2024, 5, 10, 11, 0))
+        self.assertEqual(tasks[9]["tile"], "full")
 
 
 if __name__ == "__main__":

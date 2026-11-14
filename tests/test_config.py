@@ -892,7 +892,7 @@ class ConfigTests(unittest.TestCase):
             gfx_recipe.write_text(gfx_text, encoding="utf-8")
 
             raw = example()
-            raw["pygraf graphics slides"] = {"enable": True, "recipe": "gfx_layout.yaml"}
+            raw["pygraf slides"] = {"enable": True, "recipe": "gfx_layout.yaml"}
             main_recipe = recipes_dir / "study.yaml"
             main_recipe.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
@@ -909,15 +909,23 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(copied_again, (out_dir / "study.yaml", out_dir / "gfx_layout.yaml"))
             self.assertEqual((out_dir / "study.yaml").read_text(encoding="utf-8"), main_recipe.read_text(encoding="utf-8"))
 
-            # When pygraf graphics slides are disabled, only the main recipe is copied
+            # When pygraf slides are disabled, only the main recipe is copied
             disabled = example()
-            disabled["pygraf graphics slides"] = {"enable": False, "recipe": "gfx_layout.yaml"}
+            disabled["pygraf slides"] = {"enable": False, "recipe": "gfx_layout.yaml"}
             disabled_recipe = recipes_dir / "no_gfx.yaml"
             disabled_recipe.write_text(yaml.safe_dump(disabled, sort_keys=False), encoding="utf-8")
             out_dir2 = root / "results" / "run2"
             copied2 = copy_used_recipes(load_plan(disabled_recipe), out_dir2)
             self.assertEqual(copied2, (out_dir2 / "no_gfx.yaml",))
             self.assertFalse((out_dir2 / "gfx_layout.yaml").exists())
+
+    def test_pygraf_slides_config(self):
+        raw = example()
+        raw["pygraf slides"] = {"enable": True, "recipe": "pygraf_layout.yaml"}
+        plan = build_plan(raw)
+        self.assertIsNotNone(plan.pygraf_graphics)
+        self.assertTrue(plan.pygraf_graphics.enable)
+        self.assertEqual(plan.pygraf_graphics.recipe, "pygraf_layout.yaml")
 
     def test_title_contains_variable(self):
         self.assertTrue(title_contains_variable("T2M Time Series RMSE+BIAS"))

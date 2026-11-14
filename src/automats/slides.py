@@ -1343,7 +1343,7 @@ def build_slides(
     if plan.slide_error is not None and not has_graphics_slides:
         raise SlideError(plan.slide_error)
     if not has_mats_slides and not has_graphics_slides:
-        raise SlideError("No slides configured; add a slides or pygraf graphics slides section to the recipe")
+        raise SlideError("No slides configured; add a slides or pygraf slides section to the recipe")
     try:
         from PIL import Image
         from pptx import Presentation

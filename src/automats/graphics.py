@@ -1,13 +1,13 @@
 """
-pygraf graphics slides module for AutoMATS.
+pygraf slides module for AutoMATS.
 
 Handles:
-  1. Parsing pygraf graphics layout recipes (same valid time, same cycle).
+  1. Parsing pygraf layout recipes (same cycle same fhr, same cycle different fhr, etc.).
   2. Resolving experiments and COMROOT locations on HPC systems (e.g. gaeac6).
   3. Verifying background HPC terminal session readiness; skipping and prompting users if offline.
   4. Pulling remote graphic files via streaming tar over the background HPC terminal session.
   5. Generating OBS and missing-image placeholders.
-  6. Rendering graphic slides into the presentation deck.
+  6. Rendering pygraf slides into the presentation deck.
 """
 
 from __future__ import annotations
@@ -397,6 +397,9 @@ def parse_graphics_name(filename: str) -> Tuple[str, str, int]:
     if not clean_name.lower().endswith(".png"):
         clean_name += ".png"
 
+    # Strip any leading 10-digit cycle prefix (e.g. 2024051009_cref_full_sfc_f002.png -> cref_full_sfc_f002.png)
+    clean_name = re.sub(r"^\d{10}_", "", clean_name)
+
     m_fhr = re.search(r"_f(\d+)\.png$", clean_name, re.IGNORECASE)
     fhr = int(m_fhr.group(1)) if m_fhr else 0
 
@@ -453,7 +456,12 @@ def resolve_obs_cell_time(
         except ValueError:
             pass
 
-    if "valid" in slide_type:
+    is_compare_exps = (
+        ("graphics name" in spec and "experiment" not in spec)
+        or "same fhr" in slide_type
+        or slide_type == "same valid time"
+    )
+    if is_compare_exps:
         g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
         clean_name, tile, fhr = parse_graphics_name(g_name)
         if "_" in clean_name:
@@ -467,6 +475,12 @@ def resolve_obs_cell_time(
             if other_str.lower().startswith("obs"):
                 continue
             if re.search(r"_f\d+", other_str, re.IGNORECASE) or other_str.lower().endswith((".png", ".pg")):
+                m_cyc = re.match(r"^(\d{10})_", other_str)
+                if m_cyc:
+                    try:
+                        cycle_dt = datetime.strptime(m_cyc.group(1), "%Y%m%d%H")
+                    except ValueError:
+                        pass
                 clean_name, tile, item_fhr = parse_graphics_name(other_str)
                 fhr = item_fhr
                 if "_" in clean_name:
@@ -1073,8 +1087,8 @@ def process_graphics_slides(
 ) -> int:
     """
     Checks HPC readiness, downloads necessary graphics files from HPC,
-    and appends graphics slides to the PowerPoint presentation deck.
-    Returns the number of graphics slides successfully added.
+    and appends pygraf slides to the PowerPoint presentation deck.
+    Returns the number of pygraf slides successfully added.
     """
     if stats is not None:
         stats["saved"] = 0
@@ -1090,28 +1104,28 @@ def process_graphics_slides(
 
     recipe_name = plan.pygraf_graphics.recipe
     if not recipe_name:
-        _emit_warning("[!] Warning: 'pygraf graphics slides' enabled but no 'recipe' file specified.")
+        _emit_warning("[!] Warning: 'pygraf slides' enabled but no 'recipe' file specified.")
         return 0
 
     recipe_file = resolve_graphics_recipe_path(recipe_name, plan.recipe_path)
     if not recipe_file or not recipe_file.exists():
-        _emit_warning(f"[!] Warning: Graphics recipe file '{recipe_name}' not found.")
+        _emit_warning(f"[!] Warning: pygraf recipe file '{recipe_name}' not found.")
         return 0
 
     if yaml is None:
-        _emit_warning("[!] Warning: PyYAML is required to read graphics recipe; activate the virtual environment.")
+        _emit_warning("[!] Warning: PyYAML is required to read pygraf recipe; activate the virtual environment.")
         return 0
 
     try:
         with recipe_file.open(encoding="utf-8") as f:
             raw_data = yaml.safe_load(f)
     except Exception as e:
-        _emit_warning(f"[!] Warning: Failed to parse graphics recipe '{recipe_file}': {e}")
+        _emit_warning(f"[!] Warning: Failed to parse pygraf recipe '{recipe_file}': {e}")
         return 0
 
-    slides_config = raw_data.get("graphics slides") or raw_data.get("graphics_slides")
+    slides_config = raw_data.get("pygraf slides")
     if not slides_config or not isinstance(slides_config, list):
-        _emit_warning(f"[!] Warning: No 'graphics slides' list found in '{recipe_file}'.")
+        _emit_warning(f"[!] Warning: No 'pygraf slides' list found in '{recipe_file}'.")
         return 0
 
     # 1. Identify all required HPC clusters from experiments
@@ -1161,8 +1175,8 @@ def process_graphics_slides(
             print("\n" + "=" * 70, file=sys.stderr)
         for cluster in unready_clusters:
             _emit_warning(f"[!] Background HPC terminal session for '{cluster}' is not ready.")
-        _emit_warning("[!] Skipping pygraf graphics slides.")
-        _emit_warning("[!] To enable graphics slides, please establish the HPC session first:")
+        _emit_warning("[!] Skipping pygraf slides.")
+        _emit_warning("[!] To enable pygraf slides, please establish the HPC session first:")
         for cluster in unready_clusters:
             _emit_warning(f"        ush/ssh_helper.py {cluster}")
         _emit_warning("    and then rerun.")
@@ -1200,7 +1214,12 @@ def process_graphics_slides(
                         "dest_path": dest_obs,
                     })
                     continue
-                if "valid" in slide_type:
+                is_compare_exps = (
+                    ("graphics name" in spec and "experiment" not in spec)
+                    or "same fhr" in slide_type
+                    or slide_type == "same valid time"
+                )
+                if is_compare_exps:
                     exp_obj = resolve_experiment(item_str, plan.experiments)
                     g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
                     clean_name, tile_extracted, fhr = parse_graphics_name(g_name)
@@ -1228,6 +1247,8 @@ def process_graphics_slides(
                 else:
                     exp_ref = spec.get("experiment", "first")
                     exp_obj = resolve_experiment(exp_ref, plan.experiments)
+                    m_item_cyc = re.match(r"^(\d{10})_", item_str)
+                    row_cycle = m_item_cyc.group(1) if m_item_cyc else cycle
                     clean_name, tile_extracted, fhr = parse_graphics_name(item_str)
                     tile = tile_override or tile_extracted
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
@@ -1236,13 +1257,13 @@ def process_graphics_slides(
                         rem_path = build_remote_path(
                             comroot=exp_obj.remote_comroot,
                             prefix=prefix,
-                            cycle=cycle,
+                            cycle=row_cycle,
                             wgf=wgf,
                             tile=tile,
                             fhr=fhr,
                             graphics_name=clean_name,
                         )
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{fhr:03d}_{clean_name}"
                         transfer_tasks.append({
                             "username": user,
                             "remote_path": rem_path,
@@ -1288,9 +1309,9 @@ def process_graphics_slides(
     if stats is not None:
         stats["saved"] = newly_saved_graphics
 
-    # 4. Phase 2: Render each graphics slide into PowerPoint deck
+    # 4. Phase 2: Render each pygraf slide into PowerPoint deck
     if has_outer_progress:
-        bound_progress.update("Building pygraf graphics slides")
+        bound_progress.update("Building pygraf slides")
 
     from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
     from pptx.util import Inches, Pt
@@ -1328,7 +1349,11 @@ def process_graphics_slides(
         slide = deck.slides.add_slide(deck.slide_layouts[6])
 
         # Smartly wrap and structure title to avoid overlay with [ ⌂ Overview ] button
-        is_same_valid = "valid" in slide_type
+        is_same_valid = (
+            ("graphics name" in spec and "experiment" not in spec)
+            or "same fhr" in slide_type
+            or slide_type == "same valid time"
+        )
         if is_same_valid:
             g_name = spec.get("graphics name", "")
             clean_name, tile, fhr = parse_graphics_name(g_name)
@@ -1339,7 +1364,7 @@ def process_graphics_slides(
             exp_obj = resolve_experiment(exp_ref, plan.experiments)
             exp_name = exp_obj.display_name if exp_obj else exp_ref
             title_line1 = title
-            title_line2 = f"{exp_name}   •   Cycle: {cycle}"
+            title_line2 = f"{exp_name}   •   Cycle: {cycle}" if cycle else f"{exp_name}"
 
         # Centered heading with symmetric 1.6" margins to safely clear top-right [ ⌂ Overview ] button
         heading_w = deck.slide_width - Inches(3.2)
@@ -1395,12 +1420,13 @@ def process_graphics_slides(
             if blue_rgb is not None:
                 r_exp.font.color.rgb = blue_rgb
 
-            r_cycle = p2.add_run()
-            r_cycle.text = f"   •   Cycle: {cycle}"
-            r_cycle.font.size = Pt(12.5)
-            r_cycle.font.bold = True
-            if slate_rgb is not None:
-                r_cycle.font.color.rgb = slate_rgb
+            if cycle:
+                r_cycle = p2.add_run()
+                r_cycle.text = f"   •   Cycle: {cycle}"
+                r_cycle.font.size = Pt(12.5)
+                r_cycle.font.bold = True
+                if slate_rgb is not None:
+                    r_cycle.font.color.rgb = slate_rgb
 
         # Determine whether to crop redundant pygraf caption/header block (variable, cycle, fhr)
         is_cref = "composite" in title.lower() and "refl" in title.lower()
@@ -1434,8 +1460,8 @@ def process_graphics_slides(
                         local_img = obs_target
                     else:
                         local_img = get_obs_placeholder(output_dir)
-                elif "valid" in slide_type:
-                    # 'same valid time': item is experiment reference (e.g. 'first', 'second')
+                elif is_same_valid:
+                    # item is experiment reference (e.g. 'first', 'second')
                     exp_obj = resolve_experiment(item_str, plan.experiments)
                     caption_text = exp_obj.display_name if exp_obj else item_str
                     g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
@@ -1466,11 +1492,13 @@ def process_graphics_slides(
                     # 'same cycle': item is graphics filename (e.g. 'cref_full_sfc_f001.png')
                     exp_ref = spec.get("experiment", "first")
                     exp_obj = resolve_experiment(exp_ref, plan.experiments)
+                    m_item_cyc = re.match(r"^(\d{10})_", item_str)
+                    row_cycle = m_item_cyc.group(1) if m_item_cyc else cycle
                     clean_name, tile_extracted, fhr = parse_graphics_name(item_str)
-                    caption_text = f"F{fhr:03d}"
+                    caption_text = f"Cycle {row_cycle} F{fhr:03d}" if m_item_cyc else f"F{fhr:03d}"
 
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{fhr:03d}_{clean_name}"
                         if not (local_img.exists() and local_img.stat().st_size > 0):
                             local_img = get_missing_placeholder(output_dir, clean_name)
                     else:

@@ -65,7 +65,7 @@ class GraphicsTests(unittest.TestCase):
                     "statistic": ["rmse"],
                 }
             ],
-            "pygraf graphics slides": {
+            "pygraf slides": {
                 "enable": True,
                 "recipe": "graphics_May2024_layout2.yaml",
             },
@@ -106,7 +106,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050612\n"
@@ -146,7 +146,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             # Cache paths must continue using full canonical exp.name directories
@@ -205,7 +205,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Composite Reflectivity\n"
                 "  cycle: 2024050612\n"
@@ -245,7 +245,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             for exp_name in (
@@ -575,7 +575,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050612\n"
@@ -599,7 +599,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             # Pre-cache exp1 so only exp2 (1 pygraf) + obs (1 MRMS) are newly downloaded
@@ -752,7 +752,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050612\n"
@@ -775,7 +775,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             def fake_batch_pull(tasks, max_workers=1, debug=False):
@@ -801,7 +801,7 @@ class GraphicsTests(unittest.TestCase):
             self.assertEqual(added_fail, 0)
             self.assertEqual(mock_recover_fail.call_count, 1)
             self.assertIn("checking SSH connection", out_fail.getvalue())
-            self.assertIn("Skipping pygraf graphics slides", err_fail.getvalue())
+            self.assertIn("Skipping pygraf slides", err_fail.getvalue())
 
             out_ok = StringIO()
             stats = {}
@@ -850,7 +850,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050612\n"
@@ -873,7 +873,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             progress_stream = io.StringIO()
@@ -903,7 +903,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050700\n"
@@ -935,7 +935,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             expected_warning = "[!] Warning: Experiment 'exp_no_comroot' has no COMROOT configured."
@@ -978,7 +978,7 @@ class GraphicsTests(unittest.TestCase):
             self.assertEqual(output.count(expected_warning), 1)
             self.assertIn(f"\r{expected_warning}\n", output)
             self.assertNotIn(f"session{expected_warning}", output)
-            self.assertIn("Building pygraf graphics slides", output)
+            self.assertIn("Building pygraf slides", output)
 
             # 3. Bare /gpfs/f6/... infers gaeac6 for download, while unknown bare paths warn cleanly once
             plan_inferred = build_plan({
@@ -996,7 +996,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
             captured_tasks = []
             err3 = io.StringIO()
@@ -1042,9 +1042,9 @@ class BaselineC6Tests(unittest.TestCase):
             "- name: existing_other\n"
             "  color: blue\n"
             "  COMROOT: gaeac6:/gpfs/f6/existing/com/rrfs/v2.1.4\n"
-            "pygraf graphics slides:\n"
+            "pygraf slides:\n"
             "  enable: true\n"
-            "  recipe: graphics_slides_layout2_May2024.yaml\n"
+            "  recipe: pygraf_slides_layout2_May2024.yaml\n"
             "common:\n"
             "  line weight: 3\n"
             "plots:\n"
@@ -1135,7 +1135,7 @@ class BaselineC6Tests(unittest.TestCase):
                 data["experiments"][1]["COMROOT"],
                 "gaeac6:/gpfs/f6/bil-fire10-oar/scratch/me/com/rrfs/v2.1.4",
             )
-            self.assertTrue(data["pygraf graphics slides"]["enable"])
+            self.assertTrue(data["pygraf slides"]["enable"])
 
     def test_main_f7_with_leading_options_and_flags(self):
         from contextlib import redirect_stderr
@@ -1283,7 +1283,7 @@ class BaselineC6Tests(unittest.TestCase):
                 "gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4",
             )
             self.assertNotIn("COMROOT", data1["experiments"][1])
-            self.assertTrue(data1["pygraf graphics slides"]["enable"])
+            self.assertTrue(data1["pygraf slides"]["enable"])
             self.assertEqual(
                 captured["warnings"],
                 ["Warning: no pygraf graphics downloaded for 'existing_other' as hpc_dir is missing."],
@@ -1368,9 +1368,9 @@ class BaselineC6Tests(unittest.TestCase):
                 "experiments:\n"
                 "- name: unrelated\n"
                 "  color: orange\n"
-                "pygraf graphics slides:\n"
+                "pygraf slides:\n"
                 "  enable: true\n"
-                "  recipe: graphics_slides_layout2_May2024.yaml\n",
+                "  recipe: pygraf_slides_layout2_May2024.yaml\n",
                 encoding="utf-8",
             )
             captured = {}

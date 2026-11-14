@@ -138,7 +138,7 @@ def main(argv=None, *, pre_slides_warnings: Iterable[str] | None = None) -> int:
             if plan.slides:
                 print(f"{len(plan.slides)} slides: {args.output_dir / 'slides.pptx'}")
             if plan.pygraf_graphics and plan.pygraf_graphics.enable:
-                print(f"pygraf graphics slides enabled ({plan.pygraf_graphics.recipe}): {args.output_dir / 'slides.pptx'}")
+                print(f"pygraf slides enabled ({plan.pygraf_graphics.recipe}): {args.output_dir / 'slides.pptx'}")
             sys.stdout.flush()
             if plan.slide_error is not None:
                 print(f"Warning: Slide generation disabled: {plan.slide_error}", file=sys.stderr, flush=True)

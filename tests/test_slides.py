@@ -350,7 +350,7 @@ class SlidesOverviewTests(unittest.TestCase):
             mock_slides.add_slide(None)
         before_count = len(mock_slides)
 
-        # Add 2 graphic slides
+        # Add 2 pygraf slides
         for _ in range(2):
             mock_slides.add_slide(None)
 

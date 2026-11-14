@@ -190,6 +190,106 @@ class GraphicsTests(unittest.TestCase):
             )
             self.assertEqual(slide1_heading.text_frame.paragraphs[1].font.color.rgb, RGBColor(70, 85, 105))
 
+    def test_process_graphics_slides_removes_per_plot_captions_for_composite_reflectivity_with_cycle_fhr(self):
+        from io import BytesIO
+        from unittest.mock import patch
+        from PIL import Image
+        from pptx import Presentation
+        from automats.graphics import process_graphics_slides
+
+        png_buf = BytesIO()
+        Image.new("RGB", (60, 40), color="navy").save(png_buf, format="PNG")
+        valid_png = png_buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gfx_recipe = tmp / "graphics_layout.yaml"
+            gfx_recipe.write_text(
+                "graphics slides:\n"
+                "- type: same valid time\n"
+                "  title: Composite Reflectivity\n"
+                "  cycle: 2024050612\n"
+                "  graphics name: cref_full_sfc_f006.png\n"
+                "  number of rows: 1\n"
+                "  row1: [first, second]\n"
+                "- type: same cycle\n"
+                "  title: Composite Reflectivity\n"
+                "  experiment: second\n"
+                "  cycle: 2024050612\n"
+                "  number of rows: 1\n"
+                "  row1: [cref_full_sfc_f006.png]\n",
+                encoding="utf-8",
+            )
+            plan = build_plan({
+                "common": {"start": "2024-05-06T00:00:00Z", "end": "2024-05-07T00:00:00Z"},
+                "experiments": [
+                    {
+                        "name": "RRFSv2_conus_3km_ret_v2x_retv4",
+                        "short name": "base4",
+                        "color": "red",
+                        "COMROOT": "gaeac6:/gpfs/exp1/com/rrfs/v2",
+                    },
+                    {
+                        "name": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+                        "short name": "3p5km",
+                        "color": "blue",
+                        "COMROOT": "gaeac6:/gpfs/exp2/com/rrfs/v2",
+                    },
+                ],
+                "plots": [
+                    {
+                        "name": "sfc_tseries",
+                        "application": "surface",
+                        "plot_type": "time series",
+                        "variable": ["t2m"],
+                        "statistic": ["rmse"],
+                    }
+                ],
+                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+            })
+
+            for exp_name in (
+                "RRFSv2_conus_3km_ret_v2x_retv4",
+                "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+            ):
+                p = tmp / "graphics" / exp_name / "2024050612_006_cref_full_sfc_f006.png"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(valid_png)
+
+            deck = Presentation()
+            with patch("automats.graphics.test_hpc_session_ready", return_value=True):
+                added = process_graphics_slides(plan, tmp, deck)
+
+            self.assertEqual(added, 2)
+            slide1_texts = [s.text for s in deck.slides[0].shapes if s.has_text_frame]
+            slide2_texts = [s.text for s in deck.slides[1].shapes if s.has_text_frame]
+
+            # In Slide 1 (same valid time, minor title has cycle and fhr), labels are clean and header is cropped
+            self.assertIn("base4", slide1_texts)
+            self.assertIn("3p5km", slide1_texts)
+            self.assertTrue(any("Cycle: 2024050612 F006" in t for t in slide1_texts))
+
+            # In Slide 2 (same cycle, minor title has cycle but no fhr), per-plot caption F006 is retained
+            self.assertIn("F006", slide2_texts)
+            self.assertTrue(any("3p5km" in t and "Cycle: 2024050612" in t for t in slide2_texts))
+
+    def test_crop_pygraf_header(self):
+        from PIL import Image, ImageDraw
+        from automats.graphics import crop_pygraf_header
+
+        # Synthesize a pygraf-like image (712 x 549) with top border at y=67
+        im = Image.new("RGB", (712, 549), color="white")
+        draw = ImageDraw.Draw(im)
+        draw.text((100, 20), "Composite Reflectivity (dBZ, shaded)", fill=(0, 0, 0))
+        draw.line([(11, 67), (706, 67)], fill=(0, 0, 0), width=1)
+
+        cropped = crop_pygraf_header(im)
+        self.assertEqual(cropped.size, (712, 482))
+
+        # Image without pygraf border is returned unchanged
+        small_im = Image.new("RGB", (100, 100), color="white")
+        self.assertEqual(crop_pygraf_header(small_im).size, (100, 100))
+
     def test_parse_graphics_name(self):
         # Standard .png
         name, tile, fhr = parse_graphics_name("cref_full_sfc_f006.png")

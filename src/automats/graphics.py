@@ -1036,6 +1036,34 @@ def resolve_graphics_recipe_path(recipe_name: str, base_recipe_path: Optional[Pa
     return None
 
 
+def crop_pygraf_header(im: Any) -> Any:
+    """Crops the redundant top title/caption block from a pygraf figure.
+
+    In pygraf figures, the top caption (variable, cycle, forecast hour) sits
+    above the black map bounding box, which begins around y=67 (or 10-18% of height).
+    """
+    try:
+        rgb = im.convert("RGB")
+        w, h = im.size
+        min_y = int(h * 0.08)
+        max_y = int(h * 0.18)
+        best_y = None
+        max_dark = 0
+        for y in range(min_y, max_y):
+            dark = sum(
+                1 for x in range(10, w - 10)
+                if rgb.getpixel((x, y))[0] < 50 and rgb.getpixel((x, y))[1] < 50 and rgb.getpixel((x, y))[2] < 50
+            )
+            if dark > max_dark and dark > w * 0.15:
+                max_dark = dark
+                best_y = y
+        if best_y is not None:
+            return im.crop((0, best_y, w, h))
+    except Exception:
+        pass
+    return im
+
+
 def process_graphics_slides(
     plan: Plan,
     output_dir: Path,
@@ -1269,8 +1297,8 @@ def process_graphics_slides(
     from PIL import Image
 
     margin = Inches(0.4)
-    content_top = Inches(0.85)
-    content_bottom = Inches(7.1)
+    content_top = Inches(0.82)
+    content_bottom = Inches(7.20)
     avail_height = content_bottom - content_top
     caption_height = Inches(0.3)
 
@@ -1374,14 +1402,24 @@ def process_graphics_slides(
             if slate_rgb is not None:
                 r_cycle.font.color.rgb = slate_rgb
 
-        row_gap = Inches(0.15)
+        # Determine whether to crop redundant pygraf caption/header block (variable, cycle, fhr)
+        is_cref = "composite" in title.lower() and "refl" in title.lower()
+        has_cycle_and_fhr = "cycle" in title_line2.lower() and bool(re.search(r"\bf\d+", title_line2, re.IGNORECASE))
+        should_crop_header = spec.get("crop_header", (is_cref and has_cycle_and_fhr))
+
+        # Determine whether to show per-plot captions
+        spec_caption_opt = spec.get("captions") if "captions" in spec else spec.get("caption")
+        show_captions = bool(spec_caption_opt) if spec_caption_opt is not None else True
+
+        caption_height = Inches(0.24) if show_captions else Inches(0.0)
+        row_gap = Inches(0.10)
         row_height = (avail_height - row_gap * (len(rows_data) - 1)) // len(rows_data)
 
         for row_idx, row_items in enumerate(rows_data):
             row_top = content_top + row_idx * (row_height + row_gap)
             col_gap = Inches(0.15)
             cell_width = (deck.slide_width - 2 * margin - col_gap * (len(row_items) - 1)) // len(row_items)
-            img_avail_h = row_height - caption_height - Inches(0.04)
+            img_avail_h = row_height - caption_height - Inches(0.02) if show_captions else row_height
 
             for col_idx, item in enumerate(row_items):
                 item_str = str(item).strip()
@@ -1457,31 +1495,44 @@ def process_graphics_slides(
                 # Measure and position image
                 try:
                     with Image.open(local_img) as im:
-                        pw, ph = im.size
+                        if should_crop_header and not item_str.lower().startswith("obs"):
+                            cropped_im = crop_pygraf_header(im)
+                        else:
+                            cropped_im = im.copy()
+                        pw, ph = cropped_im.size
+                        buf = BytesIO()
+                        cropped_im.save(buf, format="PNG")
+                        img_bytes = buf.getvalue()
                 except Exception:
                     pw, ph = 1200, 900
+                    try:
+                        img_bytes = local_img.read_bytes()
+                    except Exception:
+                        img_bytes = b""
 
                 scale = min(cell_width / pw, img_avail_h / ph)
                 w = max(1, int(pw * scale))
                 h = max(1, int(ph * scale))
                 img_left = cell_left + (cell_width - w) // 2
-                img_top = row_top + caption_height + (img_avail_h - h) // 2
+                if show_captions:
+                    img_top = row_top + caption_height + (img_avail_h - h) // 2
 
-                # Add caption centered above the figure
-                cap_box = slide.shapes.add_textbox(cell_left, row_top, cell_width, caption_height)
-                cap_tf = cap_box.text_frame
-                cap_tf.word_wrap = True
-                cap_tf.margin_left = cap_tf.margin_right = cap_tf.margin_top = cap_tf.margin_bottom = 0
-                cap_p = cap_tf.paragraphs[0]
-                cap_p.text = caption_text
-                cap_p.alignment = PP_ALIGN.CENTER
-                cap_p.font.size = Pt(13)
-                cap_p.font.bold = True
+                    # Add caption centered above the figure
+                    cap_box = slide.shapes.add_textbox(cell_left, row_top, cell_width, caption_height)
+                    cap_tf = cap_box.text_frame
+                    cap_tf.word_wrap = True
+                    cap_tf.margin_left = cap_tf.margin_right = cap_tf.margin_top = cap_tf.margin_bottom = 0
+                    cap_p = cap_tf.paragraphs[0]
+                    cap_p.text = caption_text
+                    cap_p.alignment = PP_ALIGN.CENTER
+                    cap_p.font.size = Pt(12.5)
+                    cap_p.font.bold = True
+                else:
+                    img_top = row_top + (img_avail_h - h) // 2
 
                 # Add picture
                 try:
-                    img_data = local_img.read_bytes()
-                    slide.shapes.add_picture(BytesIO(img_data), img_left, img_top, w, h)
+                    slide.shapes.add_picture(BytesIO(img_bytes), img_left, img_top, w, h)
                 except Exception as e:
                     _emit_warning(f"[!] Warning: Could not add picture '{local_img}': {e}")
 

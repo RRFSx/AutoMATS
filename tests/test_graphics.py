@@ -1073,7 +1073,7 @@ class BaselineC6Tests(unittest.TestCase):
             "  COMROOT: gaeac6:/gpfs/f6/existing/com/rrfs/v2.1.4\n"
             "pygraf slides:\n"
             "  enable: true\n"
-            "  recipe: pygraf_slides_layout2_May2024.yaml\n"
+            "  recipe: pygraf_slides_2exps_May2024.yaml\n"
             "common:\n"
             "  line weight: 3\n"
             "plots:\n"
@@ -1399,7 +1399,7 @@ class BaselineC6Tests(unittest.TestCase):
                 "  color: orange\n"
                 "pygraf slides:\n"
                 "  enable: true\n"
-                "  recipe: pygraf_slides_layout2_May2024.yaml\n",
+                "  recipe: pygraf_slides_2exps_May2024.yaml\n",
                 encoding="utf-8",
             )
             captured = {}

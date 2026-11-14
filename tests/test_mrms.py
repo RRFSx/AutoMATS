@@ -234,7 +234,7 @@ class TestMRMS(unittest.TestCase):
         self.assertEqual(res_single, [datetime(2024, 5, 7, 6, 0)])
 
         # extract_obs_from_recipe
-        recipe_path = Path(__file__).resolve().parent.parent / "recipes" / "pygraf_slides_layout2_May2024.yaml"
+        recipe_path = Path(__file__).resolve().parent.parent / "recipes" / "pygraf_slides_2exps_May2024.yaml"
         tasks = mod.extract_obs_from_recipe(recipe_path)
         self.assertEqual(len(tasks), 10)
         self.assertEqual(tasks[0]["valid_dt"], datetime(2024, 5, 8, 0, 0))

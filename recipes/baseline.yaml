@@ -30,7 +30,7 @@ experiments:
 
 pygraf slides:
   enable: true
-  recipe: pygraf_slides_layout2_May2024.yaml
+  recipe: pygraf_slides_2exps_May2024.yaml
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # detailed recipes
@@ -300,6 +300,6 @@ slides:
   row2: [threshold5, threshold10]
 
 # ------ pygraf graphics is specified in pygraf_* recipes  ------
-# eg: recipes/pygraf_slides_layout2_May2024.yaml
+# eg: recipes/pygraf_slides_2exps_May2024.yaml
 #
 #

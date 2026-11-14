@@ -19,9 +19,9 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from automats.cli import main as automats_main
 
-BASELINE_EXPERIMENT = "RRFSv2_conus_3km_ret_v2x_retv4"
-BASELINE_SHORT_NAME = "base4"
-BASELINE_HPC_DIR = "/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4"
+BASELINE_EXPERIMENT = "RRFSv2_conus_3km_ret_v2x_retv5"
+BASELINE_SHORT_NAME = "base5"
+BASELINE_HPC_DIR = "/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2.retv5/com/rrfs/v2.1.4"
 
 
 def resolve_comroot(hpc_dir: str) -> str:

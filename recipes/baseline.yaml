@@ -16,7 +16,7 @@ experiments:
 - MATS name: RRFSv2_conus_3km_ret_v2x_retv4
   short name: base4
   color: red
-  COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
+  COMROOT: /gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
 - MATS name: RRFSv2_conus_3km_ret_v2x_retv5
   short name: base5
   color: blue
@@ -299,3 +299,7 @@ slides:
   row1: [threshold1, threshold3]
   row2: [threshold5, threshold10]
 
+# ------ pygraf graphics is specified in pygraf_* recipes  ------
+# eg: recipes/pygraf_slides_layout2_May2024.yaml
+#
+#

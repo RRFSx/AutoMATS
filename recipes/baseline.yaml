@@ -1,10 +1,13 @@
 # baseline recipe to generate MATS verification plots/slides.
 #   sfc_dieoff:  t2m, td2m, wind10m, rmse+bias
-#   sfc_tseries: t2m, td2m, wind10m, rmse, bias, f000, f001, f012
+#   sfc_tseries: t2m, td2m, wind10m, rmse+bias, f000, f001, f012
 #   RAOB_dieoff:   T, RHobT, Wind, rmse+bias
-#   RAOB_profile:  T, RHobT, Wind, rmse+bias, f000, f001, f003, f006, f009, f012
-#   RAOB_tseries:  T, RHobT, Wind, rmse+bias, f001
-#   radar_dieoff:      cref, csi+freq, treshold25, threshold35, threshold45
+#   RAOB_profile:  T, RHobT, Wind, rmse+bias, f000, f001, f003, f006, f012, f024
+#   RAOB_tseries:  T, RHobT, Wind, rmse+bias, f000, f001, f003, f006, f012, f024
+#   AMDAR_dieoff:   T, RHobT, Wind, rmse+bias
+#   AMDAR_profile:  T, RHobT, Wind, rmse+bias, f000, f001, f003, f006, f012, f024
+#   AMDAR_tseries:  T, RHobT, Wind, rmse+bias, f000, f001, f003, f006, f012, f024
+#   radar_dieoff:      cref, csi+freq, threshold15, treshold25, threshold35, threshold45
 #   ceiling_dieoff:    csi+freq, treshold500, threshold1000, threshold3000, threshold6000
 #   visibility_dieoff: csi+freq, treshold1, threshold3, threshold5, threshold10
 #   graphics: CREF_full
@@ -13,7 +16,7 @@ experiments:
 - MATS name: RRFSv2_conus_3km_ret_v2x_retv4
   short name: base4
   color: red
-  COMROOT: gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
+  COMROOT: /gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4
 - MATS name: RRFSv2_conus_3km_ret_v2x_retv5
   short name: base5
   color: blue
@@ -25,9 +28,9 @@ experiments:
 #  short name: RRFSA
 #  color: "#5F5F5F"
 
-pygraf graphics slides:
+pygraf slides:
   enable: true
-  recipe: graphics_slides_layout2_May2024.yaml
+  recipe: pygraf_slides_2exps_May2024.yaml
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # detailed recipes
@@ -296,3 +299,7 @@ slides:
   row1: [threshold1, threshold3]
   row2: [threshold5, threshold10]
 
+# ------ pygraf graphics is specified in pygraf_* recipes  ------
+# eg: recipes/pygraf_slides_2exps_May2024.yaml
+#
+#

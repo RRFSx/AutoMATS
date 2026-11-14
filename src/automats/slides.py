@@ -163,6 +163,95 @@ def derive_subtitle(plan: Plan) -> str:
     return "   •   ".join(parts)
 
 
+def populate_subtitle_runs(paragraph: Any, plan: Plan) -> None:
+    """Populates subtitle paragraph with runs and hyperlinks for AutoMATS and recipe."""
+    try:
+        from pptx.dml.color import RGBColor
+        from pptx.util import Pt
+    except ImportError:
+        RGBColor = tuple  # type: ignore
+        Pt = lambda x: x  # type: ignore
+
+    sub_color = RGBColor(90, 105, 120)
+    link_color = RGBColor(9, 105, 218)
+    font_size = Pt(11.5)
+
+    paragraph.font.size = font_size
+    try:
+        paragraph.font.color.rgb = sub_color
+    except Exception:
+        pass
+
+    start_dt = None
+    end_dt = None
+    for job in plan.jobs:
+        if job.start and (start_dt is None or job.start < start_dt):
+            start_dt = job.start
+        if job.end and (end_dt is None or job.end > end_dt):
+            end_dt = job.end
+
+    if start_dt and end_dt:
+        s_clean = start_dt.split("T")[0] if "T" in start_dt else start_dt[:10]
+        e_clean = end_dt.split("T")[0] if "T" in end_dt else end_dt[:10]
+        r1 = paragraph.add_run()
+        r1.text = f"Evaluation Period: {s_clean} to {e_clean}   •   "
+        r1.font.size = font_size
+        try:
+            r1.font.color.rgb = sub_color
+        except Exception:
+            pass
+
+    r2 = paragraph.add_run()
+    r2.text = "Powered by "
+    r2.font.size = font_size
+    try:
+        r2.font.color.rgb = sub_color
+    except Exception:
+        pass
+
+    r_automats = paragraph.add_run()
+    r_automats.text = "AutoMATS"
+    r_automats.font.size = font_size
+    r_automats.font.underline = True
+    try:
+        r_automats.font.color.rgb = link_color
+    except Exception:
+        pass
+    try:
+        r_automats.hyperlink.address = "https://github.com/RRFSx/AutoMATS"
+    except Exception:
+        pass
+
+    recipe_name = plan.recipe_path.name if plan.recipe_path else ""
+    if recipe_name:
+        r_rec_label = paragraph.add_run()
+        r_rec_label.text = " , Recipe: "
+        r_rec_label.font.size = font_size
+        try:
+            r_rec_label.font.color.rgb = sub_color
+        except Exception:
+            pass
+
+        r_rec_val = paragraph.add_run()
+        r_rec_val.text = recipe_name
+        r_rec_val.font.size = font_size
+        if recipe_name.strip().casefold() == "baseline.yaml":
+            r_rec_val.font.underline = True
+            try:
+                r_rec_val.font.color.rgb = link_color
+            except Exception:
+                pass
+            try:
+                r_rec_val.hyperlink.address = "https://github.com/RRFSx/AutoMATS/blob/main/recipes/baseline.yaml"
+            except Exception:
+                pass
+        else:
+            try:
+                r_rec_val.font.color.rgb = sub_color
+            except Exception:
+                pass
+
+
 def classify_slide_section(title: str, plot_group: str = "") -> str:
     """Classifies a slide into a navigation category (Surface, Upper Air, Radar Refl, etc.)."""
     combined = f"{title} {plot_group}".lower()
@@ -234,9 +323,7 @@ def populate_overview_slide(
     p1.font.color.rgb = RGBColor(26, 43, 76)  # Deep Navy
 
     p2 = tf.add_paragraph()
-    p2.text = derive_subtitle(plan)
-    p2.font.size = Pt(11.5)
-    p2.font.color.rgb = RGBColor(90, 105, 120)
+    populate_subtitle_runs(p2, plan)
 
     # 2. Quick Navigation Bar
     active_sections = [s for s in PREFERRED_SECTIONS if s in section_first_slide]
@@ -1256,7 +1343,7 @@ def build_slides(
     if plan.slide_error is not None and not has_graphics_slides:
         raise SlideError(plan.slide_error)
     if not has_mats_slides and not has_graphics_slides:
-        raise SlideError("No slides configured; add a slides or pygraf graphics slides section to the recipe")
+        raise SlideError("No slides configured; add a slides or pygraf slides section to the recipe")
     try:
         from PIL import Image
         from pptx import Presentation

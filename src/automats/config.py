@@ -820,16 +820,16 @@ def build_plan(raw: Any, recipe_path: Path | None = None) -> Plan:
         slides = ()
         slide_error = str(error)
 
-    pygraf_raw = raw.get("pygraf graphics slides")
+    pygraf_raw = raw.get("pygraf slides")
     pygraf_cfg = None
     if pygraf_raw is not None:
-        pygraf_raw = _mapping(pygraf_raw, "pygraf graphics slides")
+        pygraf_raw = _mapping(pygraf_raw, "pygraf slides")
         unknown = set(pygraf_raw) - {"enable", "recipe"}
         if unknown:
-            raise ConfigError(f"Unknown pygraf graphics slides options: {sorted(unknown)}")
-        enable = _boolean(pygraf_raw.get("enable", False), "pygraf graphics slides.enable")
+            raise ConfigError(f"Unknown pygraf slides options: {sorted(unknown)}")
+        enable = _boolean(pygraf_raw.get("enable", False), "pygraf slides.enable")
         recipe_val = pygraf_raw.get("recipe")
-        recipe_str = _text(recipe_val, "pygraf graphics slides.recipe") if recipe_val is not None else None
+        recipe_str = _text(recipe_val, "pygraf slides.recipe") if recipe_val is not None else None
         pygraf_cfg = PygrafGraphicsConfig(enable=enable, recipe=recipe_str)
 
     recipe_title = _text(raw["title"], "title") if "title" in raw and raw["title"] is not None else None
@@ -871,7 +871,7 @@ def _atomic_copy_file(source: Path, destination: Path) -> bool:
 
 
 def copy_used_recipes(plan: Plan, output_dir: Path, recipe_path: Path | None = None) -> tuple[Path, ...]:
-    """Copy the active recipe (and enabled pygraf graphics recipe) into output_dir for reference."""
+    """Copy the active recipe (and enabled pygraf slides recipe) into output_dir for reference."""
     main_recipe = recipe_path if recipe_path is not None else plan.recipe_path
     if main_recipe is None or not main_recipe.is_file():
         return ()

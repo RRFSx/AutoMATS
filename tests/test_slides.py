@@ -8,6 +8,7 @@ from automats.slides import (
     classify_slide_section,
     derive_deck_title,
     derive_subtitle,
+    populate_subtitle_runs,
     parse_color_to_rgb,
     PREFERRED_SECTIONS,
 )
@@ -106,6 +107,63 @@ class SlidesOverviewTests(unittest.TestCase):
         subtitle = derive_subtitle(plan)
         self.assertIn("Evaluation Period: 2024-05-01 to 2024-05-15", subtitle)
         self.assertIn("Powered by AutoMATS , Recipe: baseline.yaml", subtitle)
+
+    def test_populate_subtitle_runs_hyperlinks(self):
+        try:
+            from pptx import Presentation
+            from pptx.util import Inches
+        except ImportError:
+            self.skipTest("pptx not installed")
+
+        prs = Presentation()
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        tb = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(10), Inches(2))
+        p = tb.text_frame.paragraphs[0]
+
+        job1 = MagicMock(start="2024-05-01T00:00:00Z", end="2024-05-10T00:00:00Z")
+        job2 = MagicMock(start="2024-05-02T00:00:00Z", end="2024-05-15T00:00:00Z")
+        plan_baseline = Plan(
+            jobs=(job1, job2),
+            warnings=(),
+            settings=MagicMock(),
+            experiments=(),
+            slides=(),
+            recipe_path=Path("baseline.yaml"),
+        )
+        populate_subtitle_runs(p, plan_baseline)
+
+        self.assertEqual(p.text, derive_subtitle(plan_baseline))
+        self.assertEqual(p.text, "Evaluation Period: 2024-05-01 to 2024-05-15   •   Powered by AutoMATS , Recipe: baseline.yaml")
+
+        runs_dict = {r.text: r for r in p.runs}
+        self.assertIn("AutoMATS", runs_dict)
+        self.assertEqual(runs_dict["AutoMATS"].hyperlink.address, "https://github.com/RRFSx/AutoMATS")
+        self.assertTrue(runs_dict["AutoMATS"].font.underline)
+
+        self.assertIn("baseline.yaml", runs_dict)
+        self.assertEqual(
+            runs_dict["baseline.yaml"].hyperlink.address,
+            "https://github.com/RRFSx/AutoMATS/blob/main/recipes/baseline.yaml",
+        )
+        self.assertTrue(runs_dict["baseline.yaml"].font.underline)
+
+        # Test with custom recipe that is not baseline.yaml
+        p2 = tb.text_frame.add_paragraph()
+        plan_custom = Plan(
+            jobs=(),
+            warnings=(),
+            settings=MagicMock(),
+            experiments=(),
+            slides=(),
+            recipe_path=Path("custom_suite.yaml"),
+        )
+        populate_subtitle_runs(p2, plan_custom)
+        self.assertEqual(p2.text, derive_subtitle(plan_custom))
+        runs2_dict = {r.text: r for r in p2.runs}
+        self.assertIn("AutoMATS", runs2_dict)
+        self.assertEqual(runs2_dict["AutoMATS"].hyperlink.address, "https://github.com/RRFSx/AutoMATS")
+        self.assertIn("custom_suite.yaml", runs2_dict)
+        self.assertIsNone(getattr(runs2_dict["custom_suite.yaml"].hyperlink, "address", None))
 
     def test_classify_slide_section(self):
         self.assertEqual(classify_slide_section("Surface 2m Temperature", "sfc_t2m"), "Surface")
@@ -292,7 +350,7 @@ class SlidesOverviewTests(unittest.TestCase):
             mock_slides.add_slide(None)
         before_count = len(mock_slides)
 
-        # Add 2 graphic slides
+        # Add 2 pygraf slides
         for _ in range(2):
             mock_slides.add_slide(None)
 

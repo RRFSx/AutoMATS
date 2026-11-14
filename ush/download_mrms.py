@@ -238,10 +238,10 @@ def load_recipe_yaml(path: Path) -> Dict[str, Any]:
 
 
 def extract_obs_from_recipe(recipe_path: Path) -> List[Dict[str, Any]]:
-    """Reads graphics slides recipe and extracts observation tasks."""
+    """Reads pygraf slides recipe and extracts observation tasks."""
     data = load_recipe_yaml(recipe_path)
 
-    slides_config = data.get("graphics slides") or data.get("graphics_slides")
+    slides_config = data.get("pygraf slides")
     if not slides_config or not isinstance(slides_config, list):
         return []
 
@@ -266,7 +266,7 @@ def main(argv=None) -> int:
         description="Download MRMS observation plots from NOAA NSSL Product Viewer.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("recipe", nargs="?", type=Path, help="Optional YAML recipe containing graphics slides")
+    parser.add_argument("recipe", nargs="?", type=Path, help="Optional YAML recipe containing pygraf slides")
     parser.add_argument("-o", "--output-dir", type=Path, default=Path("graphics/obs"), help="Destination directory (default: ./graphics/obs)")
     parser.add_argument("--var", default="cref", help="Variable / product (default: cref)")
     parser.add_argument("--tile", default=None,

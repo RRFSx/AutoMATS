@@ -1,13 +1,13 @@
 """
-pygraf graphics slides module for AutoMATS.
+pygraf slides module for AutoMATS.
 
 Handles:
-  1. Parsing pygraf graphics layout recipes (same valid time, same cycle).
+  1. Parsing pygraf layout recipes (same cycle same fhr, same cycle different fhr, etc.).
   2. Resolving experiments and COMROOT locations on HPC systems (e.g. gaeac6).
   3. Verifying background HPC terminal session readiness; skipping and prompting users if offline.
   4. Pulling remote graphic files via streaming tar over the background HPC terminal session.
   5. Generating OBS and missing-image placeholders.
-  6. Rendering graphic slides into the presentation deck.
+  6. Rendering pygraf slides into the presentation deck.
 """
 
 from __future__ import annotations
@@ -397,6 +397,9 @@ def parse_graphics_name(filename: str) -> Tuple[str, str, int]:
     if not clean_name.lower().endswith(".png"):
         clean_name += ".png"
 
+    # Strip any leading 10-digit cycle prefix (e.g. 2024051009_cref_full_sfc_f002.png -> cref_full_sfc_f002.png)
+    clean_name = re.sub(r"^\d{10}_", "", clean_name)
+
     m_fhr = re.search(r"_f(\d+)\.png$", clean_name, re.IGNORECASE)
     fhr = int(m_fhr.group(1)) if m_fhr else 0
 
@@ -453,7 +456,12 @@ def resolve_obs_cell_time(
         except ValueError:
             pass
 
-    if "valid" in slide_type:
+    is_compare_exps = (
+        ("graphics name" in spec and "experiment" not in spec)
+        or "same fhr" in slide_type
+        or slide_type == "same valid time"
+    )
+    if is_compare_exps:
         g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
         clean_name, tile, fhr = parse_graphics_name(g_name)
         if "_" in clean_name:
@@ -467,6 +475,12 @@ def resolve_obs_cell_time(
             if other_str.lower().startswith("obs"):
                 continue
             if re.search(r"_f\d+", other_str, re.IGNORECASE) or other_str.lower().endswith((".png", ".pg")):
+                m_cyc = re.match(r"^(\d{10})_", other_str)
+                if m_cyc:
+                    try:
+                        cycle_dt = datetime.strptime(m_cyc.group(1), "%Y%m%d%H")
+                    except ValueError:
+                        pass
                 clean_name, tile, item_fhr = parse_graphics_name(other_str)
                 fhr = item_fhr
                 if "_" in clean_name:
@@ -1036,6 +1050,91 @@ def resolve_graphics_recipe_path(recipe_name: str, base_recipe_path: Optional[Pa
     return None
 
 
+def detect_pygraf_borders(im: Any) -> Tuple[Optional[int], Optional[int]]:
+    """Detects top and bottom border line y-coordinates of a pygraf map.
+
+    Returns (top_y, bottom_y) where top_y is the top border line (below the
+    pygraf header) and bottom_y is the bottom border line (above the colorbar).
+    """
+    try:
+        rgb = im.convert("RGB")
+        pix = rgb.load()
+        w, h = im.size
+
+        # 1. Top border: search within 5% to 25% of height
+        top_y = None
+        for y in range(int(h * 0.05), int(h * 0.25)):
+            dark = sum(1 for x in range(10, w - 10) if max(pix[x, y]) <= 65)
+            if dark > w * 0.25:
+                top_y = y
+                break
+
+        # 2. Bottom border: search upwards from bottom down to 60% of height
+        bottom_y = None
+        for y in range(h - 1, int(h * 0.6), -1):
+            dark = sum(1 for x in range(10, w - 10) if max(pix[x, y]) <= 65)
+            if dark > w * 0.25:
+                bottom_y = y
+                break
+
+        return top_y, bottom_y
+    except Exception:
+        return None, None
+
+
+def extract_pygraf_colorbar(im: Any) -> Optional[Any]:
+    """Extracts horizontal colorbar from below the map border and rotates it anticlockwise 90 degrees."""
+    try:
+        rgb = im.convert("RGB")
+        pix = rgb.load()
+        w, h = im.size
+        _, bottom_y = detect_pygraf_borders(im)
+        if bottom_y is None or bottom_y + 5 >= h:
+            return None
+
+        min_x, max_x = w, 0
+        min_y, max_y = h, 0
+        found = False
+        for y in range(bottom_y + 2, h):
+            for x in range(w):
+                if pix[x, y] != (255, 255, 255):
+                    found = True
+                    if x < min_x:
+                        min_x = x
+                    if x > max_x:
+                        max_x = x
+                    if y < min_y:
+                        min_y = y
+                    if y > max_y:
+                        max_y = y
+        if found and (max_x - min_x) > w * 0.4 and (max_y - min_y) > 15:
+            cb_bbox = (max(0, min_x - 4), max(0, min_y - 2), min(w, max_x + 5), min(h, max_y + 3))
+            cb = im.crop(cb_bbox)
+            return cb.rotate(90, expand=True)
+    except Exception:
+        pass
+    return None
+
+
+def crop_pygraf_header(im: Any, crop_colorbar: bool = False) -> Any:
+    """Crops the redundant top title/caption block and optionally the bottom colorbar from a pygraf figure.
+
+    In pygraf figures, the top caption (variable, cycle, forecast hour) sits
+    above the black map bounding box (around y=67 in CONUS or y=79 in regional tiles).
+    If crop_colorbar is True, also crops off the bottom horizontal colorbar below the map.
+    """
+    try:
+        w, h = im.size
+        top_y, bottom_y = detect_pygraf_borders(im)
+        y0 = top_y if top_y is not None else 0
+        y1 = (bottom_y + 1) if (crop_colorbar and bottom_y is not None) else h
+        if y0 > 0 or y1 < h:
+            return im.crop((0, y0, w, y1))
+    except Exception:
+        pass
+    return im
+
+
 def process_graphics_slides(
     plan: Plan,
     output_dir: Path,
@@ -1045,8 +1144,8 @@ def process_graphics_slides(
 ) -> int:
     """
     Checks HPC readiness, downloads necessary graphics files from HPC,
-    and appends graphics slides to the PowerPoint presentation deck.
-    Returns the number of graphics slides successfully added.
+    and appends pygraf slides to the PowerPoint presentation deck.
+    Returns the number of pygraf slides successfully added.
     """
     if stats is not None:
         stats["saved"] = 0
@@ -1062,28 +1161,28 @@ def process_graphics_slides(
 
     recipe_name = plan.pygraf_graphics.recipe
     if not recipe_name:
-        _emit_warning("[!] Warning: 'pygraf graphics slides' enabled but no 'recipe' file specified.")
+        _emit_warning("[!] Warning: 'pygraf slides' enabled but no 'recipe' file specified.")
         return 0
 
     recipe_file = resolve_graphics_recipe_path(recipe_name, plan.recipe_path)
     if not recipe_file or not recipe_file.exists():
-        _emit_warning(f"[!] Warning: Graphics recipe file '{recipe_name}' not found.")
+        _emit_warning(f"[!] Warning: pygraf recipe file '{recipe_name}' not found.")
         return 0
 
     if yaml is None:
-        _emit_warning("[!] Warning: PyYAML is required to read graphics recipe; activate the virtual environment.")
+        _emit_warning("[!] Warning: PyYAML is required to read pygraf recipe; activate the virtual environment.")
         return 0
 
     try:
         with recipe_file.open(encoding="utf-8") as f:
             raw_data = yaml.safe_load(f)
     except Exception as e:
-        _emit_warning(f"[!] Warning: Failed to parse graphics recipe '{recipe_file}': {e}")
+        _emit_warning(f"[!] Warning: Failed to parse pygraf recipe '{recipe_file}': {e}")
         return 0
 
-    slides_config = raw_data.get("graphics slides") or raw_data.get("graphics_slides")
+    slides_config = raw_data.get("pygraf slides")
     if not slides_config or not isinstance(slides_config, list):
-        _emit_warning(f"[!] Warning: No 'graphics slides' list found in '{recipe_file}'.")
+        _emit_warning(f"[!] Warning: No 'pygraf slides' list found in '{recipe_file}'.")
         return 0
 
     # 1. Identify all required HPC clusters from experiments
@@ -1133,8 +1232,8 @@ def process_graphics_slides(
             print("\n" + "=" * 70, file=sys.stderr)
         for cluster in unready_clusters:
             _emit_warning(f"[!] Background HPC terminal session for '{cluster}' is not ready.")
-        _emit_warning("[!] Skipping pygraf graphics slides.")
-        _emit_warning("[!] To enable graphics slides, please establish the HPC session first:")
+        _emit_warning("[!] Skipping pygraf slides.")
+        _emit_warning("[!] To enable pygraf slides, please establish the HPC session first:")
         for cluster in unready_clusters:
             _emit_warning(f"        ush/ssh_helper.py {cluster}")
         _emit_warning("    and then rerun.")
@@ -1172,7 +1271,12 @@ def process_graphics_slides(
                         "dest_path": dest_obs,
                     })
                     continue
-                if "valid" in slide_type:
+                is_compare_exps = (
+                    ("graphics name" in spec and "experiment" not in spec)
+                    or "same fhr" in slide_type
+                    or slide_type == "same valid time"
+                )
+                if is_compare_exps:
                     exp_obj = resolve_experiment(item_str, plan.experiments)
                     g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
                     clean_name, tile_extracted, fhr = parse_graphics_name(g_name)
@@ -1189,7 +1293,7 @@ def process_graphics_slides(
                             fhr=fhr,
                             graphics_name=clean_name,
                         )
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{clean_name}"
                         transfer_tasks.append({
                             "username": user,
                             "remote_path": rem_path,
@@ -1200,6 +1304,8 @@ def process_graphics_slides(
                 else:
                     exp_ref = spec.get("experiment", "first")
                     exp_obj = resolve_experiment(exp_ref, plan.experiments)
+                    m_item_cyc = re.match(r"^(\d{10})_", item_str)
+                    row_cycle = m_item_cyc.group(1) if m_item_cyc else cycle
                     clean_name, tile_extracted, fhr = parse_graphics_name(item_str)
                     tile = tile_override or tile_extracted
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
@@ -1208,13 +1314,13 @@ def process_graphics_slides(
                         rem_path = build_remote_path(
                             comroot=exp_obj.remote_comroot,
                             prefix=prefix,
-                            cycle=cycle,
+                            cycle=row_cycle,
                             wgf=wgf,
                             tile=tile,
                             fhr=fhr,
                             graphics_name=clean_name,
                         )
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{clean_name}"
                         transfer_tasks.append({
                             "username": user,
                             "remote_path": rem_path,
@@ -1260,17 +1366,17 @@ def process_graphics_slides(
     if stats is not None:
         stats["saved"] = newly_saved_graphics
 
-    # 4. Phase 2: Render each graphics slide into PowerPoint deck
+    # 4. Phase 2: Render each pygraf slide into PowerPoint deck
     if has_outer_progress:
-        bound_progress.update("Building pygraf graphics slides")
+        bound_progress.update("Building pygraf slides")
 
     from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
     from pptx.util import Inches, Pt
     from PIL import Image
 
     margin = Inches(0.4)
-    content_top = Inches(0.85)
-    content_bottom = Inches(7.1)
+    content_top = Inches(0.82)
+    content_bottom = Inches(7.20)
     avail_height = content_bottom - content_top
     caption_height = Inches(0.3)
 
@@ -1300,7 +1406,11 @@ def process_graphics_slides(
         slide = deck.slides.add_slide(deck.slide_layouts[6])
 
         # Smartly wrap and structure title to avoid overlay with [ ⌂ Overview ] button
-        is_same_valid = "valid" in slide_type
+        is_same_valid = (
+            ("graphics name" in spec and "experiment" not in spec)
+            or "same fhr" in slide_type
+            or slide_type == "same valid time"
+        )
         if is_same_valid:
             g_name = spec.get("graphics name", "")
             clean_name, tile, fhr = parse_graphics_name(g_name)
@@ -1311,7 +1421,30 @@ def process_graphics_slides(
             exp_obj = resolve_experiment(exp_ref, plan.experiments)
             exp_name = exp_obj.display_name if exp_obj else exp_ref
             title_line1 = title
-            title_line2 = f"{exp_name}   •   Cycle: {cycle}"
+            if "valid" in slide_type and not cycle:
+                # Find common valid time from items
+                valid_dt_cand = None
+                for r_items in rows_data:
+                    for it in r_items:
+                        it_s = str(it).strip()
+                        m_c = re.match(r"^(\d{10})_", it_s)
+                        if m_c:
+                            _, _, it_fhr = parse_graphics_name(it_s)
+                            try:
+                                valid_dt_cand = datetime.strptime(m_c.group(1), "%Y%m%d%H") + timedelta(hours=it_fhr)
+                                break
+                            except ValueError:
+                                pass
+                    if valid_dt_cand:
+                        break
+                if valid_dt_cand:
+                    title_line2 = f"{exp_name}   •   Valid Time: {valid_dt_cand.strftime('%Y%m%d %H UTC')}"
+                else:
+                    title_line2 = f"{exp_name}"
+            elif cycle:
+                title_line2 = f"{exp_name}   •   Cycle: {cycle}"
+            else:
+                title_line2 = f"{exp_name}"
 
         # Centered heading with symmetric 1.6" margins to safely clear top-right [ ⌂ Overview ] button
         heading_w = deck.slide_width - Inches(3.2)
@@ -1367,21 +1500,81 @@ def process_graphics_slides(
             if blue_rgb is not None:
                 r_exp.font.color.rgb = blue_rgb
 
-            r_cycle = p2.add_run()
-            r_cycle.text = f"   •   Cycle: {cycle}"
-            r_cycle.font.size = Pt(12.5)
-            r_cycle.font.bold = True
-            if slate_rgb is not None:
-                r_cycle.font.color.rgb = slate_rgb
+            if "   •   " in title_line2:
+                suffix = "   •   " + title_line2.split("   •   ", 1)[1]
+                r_cycle = p2.add_run()
+                r_cycle.text = suffix
+                r_cycle.font.size = Pt(12.5)
+                r_cycle.font.bold = True
+                if slate_rgb is not None:
+                    r_cycle.font.color.rgb = slate_rgb
 
-        row_gap = Inches(0.15)
+        # Determine whether to crop redundant pygraf caption/header block (variable, cycle, fhr)
+        # Default to True for all pygraf graphics to remove per-plot headers and maximize figure display
+        should_crop_header = spec.get("crop_header", True)
+        should_crop_colorbar = spec.get("crop_colorbar", True)
+
+        # Pre-scan figures on the slide to extract a shared colorbar if present
+        slide_colorbar = None
+        if should_crop_colorbar:
+            for r_items in rows_data:
+                for it in r_items:
+                    it_s = str(it).strip()
+                    if it_s.lower().startswith("obs"):
+                        continue
+                    cand_img = None
+                    if is_same_valid:
+                        exp_obj_p = resolve_experiment(it_s, plan.experiments)
+                        gn_p = spec.get("graphics name", "cref_full_sfc_f006.png")
+                        cn_p, _, fhr_p = parse_graphics_name(gn_p)
+                        if exp_obj_p and exp_obj_p.name:
+                            p1 = output_dir / "graphics" / exp_obj_p.name / f"{cycle}_{cn_p}"
+                            p2 = output_dir / "graphics" / exp_obj_p.name / f"{cycle}_{fhr_p:03d}_{cn_p}"
+                            cand_img = p1 if p1.is_file() else (p2 if p2.is_file() else None)
+                    else:
+                        exp_ref_p = spec.get("experiment", "first")
+                        exp_obj_p = resolve_experiment(exp_ref_p, plan.experiments)
+                        m_c_p = re.match(r"^(\d{10})_", it_s)
+                        rc_p = m_c_p.group(1) if m_c_p else cycle
+                        cn_p, _, fhr_p = parse_graphics_name(it_s)
+                        if exp_obj_p and exp_obj_p.name:
+                            p1 = output_dir / "graphics" / exp_obj_p.name / f"{rc_p}_{cn_p}"
+                            p2 = output_dir / "graphics" / exp_obj_p.name / f"{rc_p}_{fhr_p:03d}_{cn_p}"
+                            cand_img = p1 if p1.is_file() else (p2 if p2.is_file() else None)
+                    if cand_img and cand_img.is_file():
+                        try:
+                            with Image.open(cand_img) as im_p:
+                                cb_p = extract_pygraf_colorbar(im_p)
+                                if cb_p is not None:
+                                    slide_colorbar = cb_p
+                                    break
+                        except Exception:
+                            pass
+                if slide_colorbar is not None:
+                    break
+
+        if slide_colorbar is not None:
+            cb_h = int(avail_height * 0.85)
+            cb_w = max(1, int(cb_h * (slide_colorbar.width / slide_colorbar.height)))
+            cb_left = deck.slide_width - margin - cb_w
+            cb_top = content_top + (avail_height - cb_h) // 2
+            grid_avail_width = cb_left - margin - Inches(0.15)
+        else:
+            grid_avail_width = deck.slide_width - 2 * margin
+
+        # Determine whether to show per-plot captions
+        spec_caption_opt = spec.get("captions") if "captions" in spec else spec.get("caption")
+        show_captions = bool(spec_caption_opt) if spec_caption_opt is not None else True
+
+        caption_height = Inches(0.24) if show_captions else Inches(0.0)
+        row_gap = Inches(0.10)
         row_height = (avail_height - row_gap * (len(rows_data) - 1)) // len(rows_data)
 
         for row_idx, row_items in enumerate(rows_data):
             row_top = content_top + row_idx * (row_height + row_gap)
             col_gap = Inches(0.15)
-            cell_width = (deck.slide_width - 2 * margin - col_gap * (len(row_items) - 1)) // len(row_items)
-            img_avail_h = row_height - caption_height - Inches(0.04)
+            cell_width = (grid_avail_width - col_gap * (len(row_items) - 1)) // len(row_items)
+            img_avail_h = row_height - caption_height - Inches(0.02) if show_captions else row_height
 
             for col_idx, item in enumerate(row_items):
                 item_str = str(item).strip()
@@ -1396,17 +1589,21 @@ def process_graphics_slides(
                         local_img = obs_target
                     else:
                         local_img = get_obs_placeholder(output_dir)
-                elif "valid" in slide_type:
-                    # 'same valid time': item is experiment reference (e.g. 'first', 'second')
+                elif is_same_valid:
+                    # item is experiment reference (e.g. 'first', 'second')
                     exp_obj = resolve_experiment(item_str, plan.experiments)
                     caption_text = exp_obj.display_name if exp_obj else item_str
                     g_name = spec.get("graphics name", "cref_full_sfc_f006.png")
                     clean_name, tile_extracted, fhr = parse_graphics_name(g_name)
 
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{clean_name}"
                         if not (local_img.exists() and local_img.stat().st_size > 0):
-                            local_img = get_missing_placeholder(output_dir, clean_name)
+                            legacy_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                            if legacy_img.exists() and legacy_img.stat().st_size > 0:
+                                local_img = legacy_img
+                            else:
+                                local_img = get_missing_placeholder(output_dir, clean_name)
                     else:
                         if not exp_obj:
                             if item_str not in warned_unresolved_exps:
@@ -1428,13 +1625,19 @@ def process_graphics_slides(
                     # 'same cycle': item is graphics filename (e.g. 'cref_full_sfc_f001.png')
                     exp_ref = spec.get("experiment", "first")
                     exp_obj = resolve_experiment(exp_ref, plan.experiments)
+                    m_item_cyc = re.match(r"^(\d{10})_", item_str)
+                    row_cycle = m_item_cyc.group(1) if m_item_cyc else cycle
                     clean_name, tile_extracted, fhr = parse_graphics_name(item_str)
-                    caption_text = f"F{fhr:03d}"
+                    caption_text = f"Cycle: {row_cycle} F{fhr:03d}" if m_item_cyc else f"F{fhr:03d}"
 
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{clean_name}"
                         if not (local_img.exists() and local_img.stat().st_size > 0):
-                            local_img = get_missing_placeholder(output_dir, clean_name)
+                            legacy_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{fhr:03d}_{clean_name}"
+                            if legacy_img.exists() and legacy_img.stat().st_size > 0:
+                                local_img = legacy_img
+                            else:
+                                local_img = get_missing_placeholder(output_dir, clean_name)
                     else:
                         if not exp_obj:
                             ref_key = str(exp_ref)
@@ -1457,33 +1660,73 @@ def process_graphics_slides(
                 # Measure and position image
                 try:
                     with Image.open(local_img) as im:
-                        pw, ph = im.size
+                        if not item_str.lower().startswith("obs"):
+                            cropped_im = crop_pygraf_header(
+                                im,
+                                crop_colorbar=(should_crop_colorbar and slide_colorbar is not None),
+                            ) if should_crop_header else (
+                                crop_pygraf_header(im, crop_colorbar=True) if (should_crop_colorbar and slide_colorbar is not None) else im.copy()
+                            )
+                        else:
+                            cropped_im = im.copy()
+                        pw, ph = cropped_im.size
+                        buf = BytesIO()
+                        cropped_im.save(buf, format="PNG")
+                        img_bytes = buf.getvalue()
                 except Exception:
                     pw, ph = 1200, 900
+                    try:
+                        img_bytes = local_img.read_bytes()
+                    except Exception:
+                        img_bytes = b""
 
                 scale = min(cell_width / pw, img_avail_h / ph)
                 w = max(1, int(pw * scale))
                 h = max(1, int(ph * scale))
                 img_left = cell_left + (cell_width - w) // 2
-                img_top = row_top + caption_height + (img_avail_h - h) // 2
+                if show_captions:
+                    img_top = row_top + caption_height + (img_avail_h - h) // 2
 
-                # Add caption centered above the figure
-                cap_box = slide.shapes.add_textbox(cell_left, row_top, cell_width, caption_height)
-                cap_tf = cap_box.text_frame
-                cap_tf.word_wrap = True
-                cap_tf.margin_left = cap_tf.margin_right = cap_tf.margin_top = cap_tf.margin_bottom = 0
-                cap_p = cap_tf.paragraphs[0]
-                cap_p.text = caption_text
-                cap_p.alignment = PP_ALIGN.CENTER
-                cap_p.font.size = Pt(13)
-                cap_p.font.bold = True
+                    # Add caption centered above the figure
+                    cap_box = slide.shapes.add_textbox(cell_left, row_top, cell_width, caption_height)
+                    cap_tf = cap_box.text_frame
+                    cap_tf.word_wrap = True
+                    cap_tf.margin_left = cap_tf.margin_right = cap_tf.margin_top = cap_tf.margin_bottom = 0
+                    cap_p = cap_tf.paragraphs[0]
+                    cap_p.text = caption_text
+                    cap_p.alignment = PP_ALIGN.CENTER
+                    cap_p.font.size = Pt(12.5)
+                    cap_p.font.bold = True
+                else:
+                    img_top = row_top + (img_avail_h - h) // 2
 
                 # Add picture
                 try:
-                    img_data = local_img.read_bytes()
-                    slide.shapes.add_picture(BytesIO(img_data), img_left, img_top, w, h)
+                    slide.shapes.add_picture(BytesIO(img_bytes), img_left, img_top, w, h)
                 except Exception as e:
                     _emit_warning(f"[!] Warning: Could not add picture '{local_img}': {e}")
+
+        # Add shared vertical colorbar on the right edge of the slide
+        if slide_colorbar is not None:
+            try:
+                cb_buf = BytesIO()
+                slide_colorbar.save(cb_buf, format="PNG")
+                cb_buf.seek(0)
+                slide.shapes.add_picture(cb_buf, cb_left, cb_top, cb_w, cb_h)
+
+                # Add a neat "dBZ" label centered above the rotated colorbar
+                tb = slide.shapes.add_textbox(cb_left - Inches(0.10), cb_top - Inches(0.35), cb_w + Inches(0.20), Inches(0.30))
+                tb_tf = tb.text_frame
+                tb_tf.margin_left = tb_tf.margin_right = tb_tf.margin_top = tb_tf.margin_bottom = 0
+                tb_p = tb_tf.paragraphs[0]
+                tb_p.text = "dBZ"
+                tb_p.font.size = Pt(11)
+                tb_p.font.bold = True
+                tb_p.alignment = PP_ALIGN.CENTER
+                if slate_rgb is not None:
+                    tb_p.font.color.rgb = slate_rgb
+            except Exception as e:
+                _emit_warning(f"[!] Warning: Could not place shared colorbar: {e}")
 
         added_count += 1
 

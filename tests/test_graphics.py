@@ -65,7 +65,7 @@ class GraphicsTests(unittest.TestCase):
                     "statistic": ["rmse"],
                 }
             ],
-            "pygraf graphics slides": {
+            "pygraf slides": {
                 "enable": True,
                 "recipe": "graphics_May2024_layout2.yaml",
             },
@@ -106,7 +106,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050612\n"
@@ -146,7 +146,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             # Cache paths must continue using full canonical exp.name directories
@@ -154,7 +154,7 @@ class GraphicsTests(unittest.TestCase):
                 "RRFSv2_conus_3km_ret_v2x_retv4",
                 "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
             ):
-                p = tmp / "graphics" / exp_name / "2024050612_006_cref_full_sfc_f006.png"
+                p = tmp / "graphics" / exp_name / "2024050612_cref_full_sfc_f006.png"
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(valid_png)
 
@@ -189,6 +189,135 @@ class GraphicsTests(unittest.TestCase):
                 if s.has_text_frame and "Cycle: 2024050612 F006" in s.text
             )
             self.assertEqual(slide1_heading.text_frame.paragraphs[1].font.color.rgb, RGBColor(70, 85, 105))
+
+    def test_process_graphics_slides_removes_per_plot_captions_for_composite_reflectivity_with_cycle_fhr(self):
+        from io import BytesIO
+        from unittest.mock import patch
+        from PIL import Image
+        from pptx import Presentation
+        from automats.graphics import process_graphics_slides
+
+        png_buf = BytesIO()
+        Image.new("RGB", (60, 40), color="navy").save(png_buf, format="PNG")
+        valid_png = png_buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gfx_recipe = tmp / "graphics_layout.yaml"
+            gfx_recipe.write_text(
+                "pygraf slides:\n"
+                "- type: same valid time\n"
+                "  title: Composite Reflectivity\n"
+                "  cycle: 2024050612\n"
+                "  graphics name: cref_full_sfc_f006.png\n"
+                "  number of rows: 1\n"
+                "  row1: [first, second]\n"
+                "- type: same cycle\n"
+                "  title: Composite Reflectivity\n"
+                "  experiment: second\n"
+                "  cycle: 2024050612\n"
+                "  number of rows: 1\n"
+                "  row1: [cref_full_sfc_f006.png]\n",
+                encoding="utf-8",
+            )
+            plan = build_plan({
+                "common": {"start": "2024-05-06T00:00:00Z", "end": "2024-05-07T00:00:00Z"},
+                "experiments": [
+                    {
+                        "name": "RRFSv2_conus_3km_ret_v2x_retv4",
+                        "short name": "base4",
+                        "color": "red",
+                        "COMROOT": "gaeac6:/gpfs/exp1/com/rrfs/v2",
+                    },
+                    {
+                        "name": "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+                        "short name": "3p5km",
+                        "color": "blue",
+                        "COMROOT": "gaeac6:/gpfs/exp2/com/rrfs/v2",
+                    },
+                ],
+                "plots": [
+                    {
+                        "name": "sfc_tseries",
+                        "application": "surface",
+                        "plot_type": "time series",
+                        "variable": ["t2m"],
+                        "statistic": ["rmse"],
+                    }
+                ],
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
+            })
+
+            for exp_name in (
+                "RRFSv2_conus_3km_ret_v2x_retv4",
+                "RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km",
+            ):
+                p = tmp / "graphics" / exp_name / "2024050612_cref_full_sfc_f006.png"
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(valid_png)
+
+            deck = Presentation()
+            with patch("automats.graphics.test_hpc_session_ready", return_value=True):
+                added = process_graphics_slides(plan, tmp, deck)
+
+            self.assertEqual(added, 2)
+            slide1_texts = [s.text for s in deck.slides[0].shapes if s.has_text_frame]
+            slide2_texts = [s.text for s in deck.slides[1].shapes if s.has_text_frame]
+
+            # In Slide 1 (same valid time, minor title has cycle and fhr), labels are clean and header is cropped
+            self.assertIn("base4", slide1_texts)
+            self.assertIn("3p5km", slide1_texts)
+            self.assertTrue(any("Cycle: 2024050612 F006" in t for t in slide1_texts))
+
+            # In Slide 2 (same cycle, minor title has cycle but no fhr), per-plot caption F006 is retained
+            self.assertIn("F006", slide2_texts)
+            self.assertTrue(any("3p5km" in t and "Cycle: 2024050612" in t for t in slide2_texts))
+
+    def test_crop_pygraf_header(self):
+        from PIL import Image, ImageDraw
+        from automats.graphics import crop_pygraf_header, detect_pygraf_borders, extract_pygraf_colorbar
+
+        # Synthesize a pygraf-like image (712 x 549) with top border at y=67
+        im = Image.new("RGB", (712, 549), color="white")
+        draw = ImageDraw.Draw(im)
+        draw.text((100, 20), "Composite Reflectivity (dBZ, shaded)", fill=(0, 0, 0))
+        draw.line([(11, 67), (706, 67)], fill=(0, 0, 0), width=1)
+
+        cropped = crop_pygraf_header(im)
+        self.assertEqual(cropped.size, (712, 482))
+
+        # Regional pygraf image (712 x 676) with #333333 (51, 51, 51) border lines and bottom colorbar
+        im_reg = Image.new("RGB", (712, 676), color="white")
+        draw_reg = ImageDraw.Draw(im_reg)
+        draw_reg.text((100, 20), "Composite Reflectivity (dBZ, shaded)", fill=(51, 51, 51))
+        # Top border at y=79
+        draw_reg.line([(11, 79), (706, 79)], fill=(51, 51, 51), width=1)
+        # Bottom border at y=604
+        draw_reg.line([(11, 604), (706, 604)], fill=(51, 51, 51), width=1)
+        # Colorbar box below y=604
+        draw_reg.rectangle([(20, 620), (690, 650)], fill=(0, 128, 255))
+
+        top_y, bottom_y = detect_pygraf_borders(im_reg)
+        self.assertEqual(top_y, 79)
+        self.assertEqual(bottom_y, 604)
+
+        # Header-only crop
+        cropped_reg_hdr = crop_pygraf_header(im_reg, crop_colorbar=False)
+        self.assertEqual(cropped_reg_hdr.size, (712, 597))
+
+        # Header + colorbar crop
+        cropped_reg_both = crop_pygraf_header(im_reg, crop_colorbar=True)
+        self.assertEqual(cropped_reg_both.size, (712, 526))
+
+        # Extract rotated colorbar
+        cb_rot = extract_pygraf_colorbar(im_reg)
+        self.assertIsNotNone(cb_rot)
+        self.assertEqual(cb_rot.size[1], 679)  # height in vertical orientation corresponds to width
+
+        # Image without pygraf border is returned unchanged
+        small_im = Image.new("RGB", (100, 100), color="white")
+        self.assertEqual(crop_pygraf_header(small_im).size, (100, 100))
+        self.assertIsNone(extract_pygraf_colorbar(small_im))
 
     def test_parse_graphics_name(self):
         # Standard .png
@@ -368,8 +497,8 @@ class GraphicsTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            out_exp1 = tmp / "exp1" / "2024050700_006_cref_full_sfc_f006.png"
-            out_exp2 = tmp / "exp2" / "2024050700_006_cref_full_sfc_f006.png"
+            out_exp1 = tmp / "exp1" / "2024050700_cref_full_sfc_f006.png"
+            out_exp2 = tmp / "exp2" / "2024050700_cref_full_sfc_f006.png"
 
             def make_tar_bytes():
                 buf = io.BytesIO()
@@ -475,7 +604,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050612\n"
@@ -499,11 +628,11 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             # Pre-cache exp1 so only exp2 (1 pygraf) + obs (1 MRMS) are newly downloaded
-            cached_exp1 = tmp / "graphics" / "exp1" / "2024050612_006_cref_full_sfc_f006.png"
+            cached_exp1 = tmp / "graphics" / "exp1" / "2024050612_cref_full_sfc_f006.png"
             cached_exp1.parent.mkdir(parents=True, exist_ok=True)
             cached_exp1.write_bytes(valid_png)
 
@@ -652,7 +781,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050612\n"
@@ -675,7 +804,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             def fake_batch_pull(tasks, max_workers=1, debug=False):
@@ -701,7 +830,7 @@ class GraphicsTests(unittest.TestCase):
             self.assertEqual(added_fail, 0)
             self.assertEqual(mock_recover_fail.call_count, 1)
             self.assertIn("checking SSH connection", out_fail.getvalue())
-            self.assertIn("Skipping pygraf graphics slides", err_fail.getvalue())
+            self.assertIn("Skipping pygraf slides", err_fail.getvalue())
 
             out_ok = StringIO()
             stats = {}
@@ -750,7 +879,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050612\n"
@@ -773,7 +902,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             progress_stream = io.StringIO()
@@ -803,7 +932,7 @@ class GraphicsTests(unittest.TestCase):
             tmp = Path(tmpdir)
             gfx_recipe = tmp / "graphics_layout.yaml"
             gfx_recipe.write_text(
-                "graphics slides:\n"
+                "pygraf slides:\n"
                 "- type: same valid time\n"
                 "  title: Reflectivity\n"
                 "  cycle: 2024050700\n"
@@ -835,7 +964,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
 
             expected_warning = "[!] Warning: Experiment 'exp_no_comroot' has no COMROOT configured."
@@ -878,7 +1007,7 @@ class GraphicsTests(unittest.TestCase):
             self.assertEqual(output.count(expected_warning), 1)
             self.assertIn(f"\r{expected_warning}\n", output)
             self.assertNotIn(f"session{expected_warning}", output)
-            self.assertIn("Building pygraf graphics slides", output)
+            self.assertIn("Building pygraf slides", output)
 
             # 3. Bare /gpfs/f6/... infers gaeac6 for download, while unknown bare paths warn cleanly once
             plan_inferred = build_plan({
@@ -896,7 +1025,7 @@ class GraphicsTests(unittest.TestCase):
                         "statistic": ["rmse"],
                     }
                 ],
-                "pygraf graphics slides": {"enable": True, "recipe": str(gfx_recipe)},
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
             })
             captured_tasks = []
             err3 = io.StringIO()
@@ -942,9 +1071,9 @@ class BaselineC6Tests(unittest.TestCase):
             "- name: existing_other\n"
             "  color: blue\n"
             "  COMROOT: gaeac6:/gpfs/f6/existing/com/rrfs/v2.1.4\n"
-            "pygraf graphics slides:\n"
+            "pygraf slides:\n"
             "  enable: true\n"
-            "  recipe: graphics_slides_layout2_May2024.yaml\n"
+            "  recipe: pygraf_slides_2exps_May2024.yaml\n"
             "common:\n"
             "  line weight: 3\n"
             "plots:\n"
@@ -1035,7 +1164,7 @@ class BaselineC6Tests(unittest.TestCase):
                 data["experiments"][1]["COMROOT"],
                 "gaeac6:/gpfs/f6/bil-fire10-oar/scratch/me/com/rrfs/v2.1.4",
             )
-            self.assertTrue(data["pygraf graphics slides"]["enable"])
+            self.assertTrue(data["pygraf slides"]["enable"])
 
     def test_main_f7_with_leading_options_and_flags(self):
         from contextlib import redirect_stderr
@@ -1183,7 +1312,7 @@ class BaselineC6Tests(unittest.TestCase):
                 "gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4",
             )
             self.assertNotIn("COMROOT", data1["experiments"][1])
-            self.assertTrue(data1["pygraf graphics slides"]["enable"])
+            self.assertTrue(data1["pygraf slides"]["enable"])
             self.assertEqual(
                 captured["warnings"],
                 ["Warning: no pygraf graphics downloaded for 'existing_other' as hpc_dir is missing."],
@@ -1268,9 +1397,9 @@ class BaselineC6Tests(unittest.TestCase):
                 "experiments:\n"
                 "- name: unrelated\n"
                 "  color: orange\n"
-                "pygraf graphics slides:\n"
+                "pygraf slides:\n"
                 "  enable: true\n"
-                "  recipe: graphics_slides_layout2_May2024.yaml\n",
+                "  recipe: pygraf_slides_2exps_May2024.yaml\n",
                 encoding="utf-8",
             )
             captured = {}
@@ -1295,6 +1424,98 @@ class BaselineC6Tests(unittest.TestCase):
                 baselinec6.resolve_comroot(baselinec6.BASELINE_HPC_DIR),
             )
             self.assertEqual(data["experiments"][1]["COMROOT"], "gaeac7:/gpfs/f7/some/com/rrfs/v2")
+
+    def test_three_pygraf_slide_types_and_simplified_naming(self):
+        from io import BytesIO
+        from unittest.mock import patch
+        from PIL import Image, ImageDraw
+        from pptx import Presentation
+        from automats.graphics import process_graphics_slides
+
+        im = Image.new("RGB", (712, 549), color="white")
+        draw = ImageDraw.Draw(im)
+        draw.text((100, 20), "Composite Reflectivity (dBZ, shaded)", fill=(0, 0, 0))
+        draw.line([(11, 67), (706, 67)], fill=(0, 0, 0), width=1)
+        buf = BytesIO()
+        im.save(buf, format="PNG")
+        pygraf_png = buf.getvalue()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            gfx_recipe = tmp / "pygraf_slides_layout2.yaml"
+            gfx_recipe.write_text(
+                "pygraf slides:\n"
+                "- type: same cycle same fhr\n"
+                "  title: Composite Reflectivity\n"
+                "  WGF: det\n"
+                "  graphics name: cref_full_sfc_f006.png\n"
+                "  cycle: 2024050700\n"
+                "  number of rows: 1\n"
+                "  row1: [first, second]\n"
+                "- type: same cycle different fhr\n"
+                "  title: Composite Reflectivity\n"
+                "  WGF: det\n"
+                "  experiment: second\n"
+                "  cycle: 2024050700\n"
+                "  number of rows: 1\n"
+                "  row1: [cref_full_sfc_f001.pg]\n"
+                "- type: different cycle same valid time\n"
+                "  title: Composite Reflectivity\n"
+                "  WGF: det\n"
+                "  experiment: second\n"
+                "  number of rows: 1\n"
+                "  row1: [2024051009_cref_full_sfc_f002.pg]\n",
+                encoding="utf-8",
+            )
+            plan = build_plan({
+                "common": {"start": "2024-05-06T00:00:00Z", "end": "2024-05-07T00:00:00Z"},
+                "experiments": [
+                    {"name": "exp1", "color": "red", "COMROOT": "gaeac6:/gpfs/exp1/com/rrfs/v2"},
+                    {"name": "exp2", "color": "blue", "COMROOT": "gaeac6:/gpfs/exp2/com/rrfs/v2"},
+                ],
+                "plots": [
+                    {
+                        "name": "sfc_tseries",
+                        "application": "surface",
+                        "plot_type": "time series",
+                        "variable": ["t2m"],
+                        "statistic": ["rmse"],
+                    }
+                ],
+                "pygraf slides": {"enable": True, "recipe": str(gfx_recipe)},
+            })
+
+            deck = Presentation()
+            with (
+                patch("automats.graphics.test_hpc_session_ready", return_value=True),
+                patch("automats.graphics.batch_pull_graphics_files", return_value={}),
+            ):
+                (tmp / "graphics" / "exp1" / "2024050700_cref_full_sfc_f006.png").parent.mkdir(parents=True, exist_ok=True)
+                (tmp / "graphics" / "exp1" / "2024050700_cref_full_sfc_f006.png").write_bytes(pygraf_png)
+                (tmp / "graphics" / "exp2" / "2024050700_cref_full_sfc_f006.png").parent.mkdir(parents=True, exist_ok=True)
+                (tmp / "graphics" / "exp2" / "2024050700_cref_full_sfc_f006.png").write_bytes(pygraf_png)
+                (tmp / "graphics" / "exp2" / "2024050700_cref_full_sfc_f001.png").parent.mkdir(parents=True, exist_ok=True)
+                (tmp / "graphics" / "exp2" / "2024050700_cref_full_sfc_f001.png").write_bytes(pygraf_png)
+                (tmp / "graphics" / "exp2" / "2024051009_cref_full_sfc_f002.png").parent.mkdir(parents=True, exist_ok=True)
+                (tmp / "graphics" / "exp2" / "2024051009_cref_full_sfc_f002.png").write_bytes(pygraf_png)
+
+                added = process_graphics_slides(plan, tmp, deck)
+
+            self.assertEqual(added, 3)
+
+            # Slide 1: same cycle same fhr
+            s1_texts = [s.text for s in deck.slides[0].shapes if s.has_text_frame]
+            self.assertTrue(any("Cycle: 2024050700 F006" in t for t in s1_texts))
+
+            # Slide 2: same cycle different fhr
+            s2_texts = [s.text for s in deck.slides[1].shapes if s.has_text_frame]
+            self.assertTrue(any("Cycle: 2024050700" in t for t in s2_texts))
+            self.assertIn("F001", s2_texts)
+
+            # Slide 3: different cycle same valid time
+            s3_texts = [s.text for s in deck.slides[2].shapes if s.has_text_frame]
+            self.assertTrue(any("Valid Time: 20240510 11 UTC" in t for t in s3_texts))
+            self.assertIn("Cycle: 2024051009 F002", s3_texts)
 
 
 if __name__ == "__main__":

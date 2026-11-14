@@ -2,10 +2,13 @@
 
 experiments:
 - MATS name: RRFSv2_conus_3km_ret_v2x_retv4
+  short name: base4
   color: red
 - MATS name: RRFSv2_conus_3km_ret_v2x_retv4p1_3p5km
+  short name: base5
   color: blue
 - MATS name: HRRR_OPS
+  short name: HRRR
   color: orange
 
 automation:
@@ -17,17 +20,17 @@ common:
   marker weight: 8
 
 plots:
-#- name: sfc_tseries
-#  application: "surface"
-#  truth: "METAR"
-#  plot_type: "time series"
-#  region: "All HRRR domain"
-#  variable: [t2m, td2m, wind10m]
-#  statistic: [rmse]
-#  forecast lead time: [0]
-#  Difference curves: "Diff all curves against the 1st added curve"
+- name: sfc_tseries
+  application: "surface"
+  truth: "METAR"
+  plot_type: "time series"
+  region: "All HRRR domain"
+  variable: [t2m, td2m, wind10m]
+  statistic: [rmse]
+  forecast lead time: [0]
+  Difference curves: "Diff all curves against the 1st added curve"
 
-#- name: ua_profile
+#- name: roab_profile
 #  application: "Upper Air"
 #  plot_type: profile
 #  truth: "RAOBs (Traditional)"
@@ -65,18 +68,18 @@ plots:
 #  statistic: [rmse, bias]
 #  forecast lead time: [0, 3]
 
-- name: radiation_dieoff
-  application: "Surface Radiation"
-  plot_type: "die off"
-  matched_samples: true
-  statistic: [rmse, bias]
-
-- name: radiation_valid_time
-  application: "Surface Radiation"
-  plot_type: "Valid Time"
-  matched_samples: true
-  statistic: [rmse, bias]
-  forecast lead time: [0, 3]
+#- name: radiation_dieoff
+#  application: "Surface Radiation"
+#  plot_type: "die off"
+#  matched_samples: true
+#  statistic: [rmse, bias]
+#
+#- name: radiation_valid_time
+#  application: "Surface Radiation"
+#  plot_type: "Valid Time"
+#  matched_samples: true
+#  statistic: [rmse, bias]
+#  forecast lead time: [0, 3]
 
 # ============================ slides ============================
 slides:
@@ -86,18 +89,18 @@ slides:
   row1: [t2m_rmse_f000, td2m_rmse_f000]
   row2: [wind10m_rmse_f000]
 
-#- plot group: ua_profile
+#- plot group: RAOB_profile
 #  title: Upper Air Profile f000, f003
 #  number of rows: 2
 #  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
 #  row2: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]
 #
-#- plot group: ua_profile
+#- plot group: RAOB_profile
 #  title: Upper Air Profile f000
 #  number of rows: 1
 #  row1: [T_rmse+bias_f000, RHobT_rmse+bias_f000, Wind_rmse+bias_f000]
 #
-#- plot group: ua_profile
+#- plot group: RAOB_profile
 #  title: Upper Air Profile f003
 #  number of rows: 1
 #  row1: [T_rmse+bias_f003, RHobT_rmse+bias_f003, Wind_rmse+bias_f003]

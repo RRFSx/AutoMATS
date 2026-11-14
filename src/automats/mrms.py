@@ -46,10 +46,10 @@ MRMS_TILES: Dict[str, Dict[str, Any]] = {
     "full": {"zoom": 4, "clon": -98.0, "clat": 38.0, "desc": "Full CONUS"},
     "conus": {"zoom": 4, "clon": -98.0, "clat": 38.0, "desc": "Full CONUS"},
     "nc": {"zoom": 6, "clon": -97.0, "clat": 43.5, "desc": "North Central"},
-    "ne": {"zoom": 6, "clon": -76.5, "clat": 42.0, "desc": "Northeast"},
+    "ne": {"zoom": 6, "clon": -80.5, "clat": 42.0, "desc": "Northeast"},
     "nw": {"zoom": 6, "clon": -114.0, "clat": 43.5, "desc": "Northwest"},
     "sc": {"zoom": 6, "clon": -96.5, "clat": 32.5, "desc": "South Central"},
-    "se": {"zoom": 6, "clon": -82.75, "clat": 29.5, "desc": "Southeast"},
+    "se": {"zoom": 6, "clon": -82.75, "clat": 33.0, "desc": "Southeast"},
     "sw": {"zoom": 6, "clon": -112.5, "clat": 34.75, "desc": "Southwest"},
     "eastco": {"zoom": 8, "clon": -104.9, "clat": 39.0, "desc": "East Colorado"},
 }

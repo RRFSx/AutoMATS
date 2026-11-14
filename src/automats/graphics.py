@@ -1050,29 +1050,86 @@ def resolve_graphics_recipe_path(recipe_name: str, base_recipe_path: Optional[Pa
     return None
 
 
-def crop_pygraf_header(im: Any) -> Any:
-    """Crops the redundant top title/caption block from a pygraf figure.
+def detect_pygraf_borders(im: Any) -> Tuple[Optional[int], Optional[int]]:
+    """Detects top and bottom border line y-coordinates of a pygraf map.
 
-    In pygraf figures, the top caption (variable, cycle, forecast hour) sits
-    above the black map bounding box, which begins around y=67 (or 10-18% of height).
+    Returns (top_y, bottom_y) where top_y is the top border line (below the
+    pygraf header) and bottom_y is the bottom border line (above the colorbar).
     """
     try:
         rgb = im.convert("RGB")
+        pix = rgb.load()
         w, h = im.size
-        min_y = int(h * 0.08)
-        max_y = int(h * 0.18)
-        best_y = None
-        max_dark = 0
-        for y in range(min_y, max_y):
-            dark = sum(
-                1 for x in range(10, w - 10)
-                if rgb.getpixel((x, y))[0] < 50 and rgb.getpixel((x, y))[1] < 50 and rgb.getpixel((x, y))[2] < 50
-            )
-            if dark > max_dark and dark > w * 0.15:
-                max_dark = dark
-                best_y = y
-        if best_y is not None:
-            return im.crop((0, best_y, w, h))
+
+        # 1. Top border: search within 5% to 25% of height
+        top_y = None
+        for y in range(int(h * 0.05), int(h * 0.25)):
+            dark = sum(1 for x in range(10, w - 10) if max(pix[x, y]) <= 65)
+            if dark > w * 0.25:
+                top_y = y
+                break
+
+        # 2. Bottom border: search upwards from bottom down to 60% of height
+        bottom_y = None
+        for y in range(h - 1, int(h * 0.6), -1):
+            dark = sum(1 for x in range(10, w - 10) if max(pix[x, y]) <= 65)
+            if dark > w * 0.25:
+                bottom_y = y
+                break
+
+        return top_y, bottom_y
+    except Exception:
+        return None, None
+
+
+def extract_pygraf_colorbar(im: Any) -> Optional[Any]:
+    """Extracts horizontal colorbar from below the map border and rotates it anticlockwise 90 degrees."""
+    try:
+        rgb = im.convert("RGB")
+        pix = rgb.load()
+        w, h = im.size
+        _, bottom_y = detect_pygraf_borders(im)
+        if bottom_y is None or bottom_y + 5 >= h:
+            return None
+
+        min_x, max_x = w, 0
+        min_y, max_y = h, 0
+        found = False
+        for y in range(bottom_y + 2, h):
+            for x in range(w):
+                if pix[x, y] != (255, 255, 255):
+                    found = True
+                    if x < min_x:
+                        min_x = x
+                    if x > max_x:
+                        max_x = x
+                    if y < min_y:
+                        min_y = y
+                    if y > max_y:
+                        max_y = y
+        if found and (max_x - min_x) > w * 0.4 and (max_y - min_y) > 15:
+            cb_bbox = (max(0, min_x - 4), max(0, min_y - 2), min(w, max_x + 5), min(h, max_y + 3))
+            cb = im.crop(cb_bbox)
+            return cb.rotate(90, expand=True)
+    except Exception:
+        pass
+    return None
+
+
+def crop_pygraf_header(im: Any, crop_colorbar: bool = False) -> Any:
+    """Crops the redundant top title/caption block and optionally the bottom colorbar from a pygraf figure.
+
+    In pygraf figures, the top caption (variable, cycle, forecast hour) sits
+    above the black map bounding box (around y=67 in CONUS or y=79 in regional tiles).
+    If crop_colorbar is True, also crops off the bottom horizontal colorbar below the map.
+    """
+    try:
+        w, h = im.size
+        top_y, bottom_y = detect_pygraf_borders(im)
+        y0 = top_y if top_y is not None else 0
+        y1 = (bottom_y + 1) if (crop_colorbar and bottom_y is not None) else h
+        if y0 > 0 or y1 < h:
+            return im.crop((0, y0, w, y1))
     except Exception:
         pass
     return im
@@ -1236,7 +1293,7 @@ def process_graphics_slides(
                             fhr=fhr,
                             graphics_name=clean_name,
                         )
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{clean_name}"
                         transfer_tasks.append({
                             "username": user,
                             "remote_path": rem_path,
@@ -1263,7 +1320,7 @@ def process_graphics_slides(
                             fhr=fhr,
                             graphics_name=clean_name,
                         )
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{clean_name}"
                         transfer_tasks.append({
                             "username": user,
                             "remote_path": rem_path,
@@ -1364,7 +1421,30 @@ def process_graphics_slides(
             exp_obj = resolve_experiment(exp_ref, plan.experiments)
             exp_name = exp_obj.display_name if exp_obj else exp_ref
             title_line1 = title
-            title_line2 = f"{exp_name}   •   Cycle: {cycle}" if cycle else f"{exp_name}"
+            if "valid" in slide_type and not cycle:
+                # Find common valid time from items
+                valid_dt_cand = None
+                for r_items in rows_data:
+                    for it in r_items:
+                        it_s = str(it).strip()
+                        m_c = re.match(r"^(\d{10})_", it_s)
+                        if m_c:
+                            _, _, it_fhr = parse_graphics_name(it_s)
+                            try:
+                                valid_dt_cand = datetime.strptime(m_c.group(1), "%Y%m%d%H") + timedelta(hours=it_fhr)
+                                break
+                            except ValueError:
+                                pass
+                    if valid_dt_cand:
+                        break
+                if valid_dt_cand:
+                    title_line2 = f"{exp_name}   •   Valid Time: {valid_dt_cand.strftime('%Y%m%d %H UTC')}"
+                else:
+                    title_line2 = f"{exp_name}"
+            elif cycle:
+                title_line2 = f"{exp_name}   •   Cycle: {cycle}"
+            else:
+                title_line2 = f"{exp_name}"
 
         # Centered heading with symmetric 1.6" margins to safely clear top-right [ ⌂ Overview ] button
         heading_w = deck.slide_width - Inches(3.2)
@@ -1420,18 +1500,67 @@ def process_graphics_slides(
             if blue_rgb is not None:
                 r_exp.font.color.rgb = blue_rgb
 
-            if cycle:
+            if "   •   " in title_line2:
+                suffix = "   •   " + title_line2.split("   •   ", 1)[1]
                 r_cycle = p2.add_run()
-                r_cycle.text = f"   •   Cycle: {cycle}"
+                r_cycle.text = suffix
                 r_cycle.font.size = Pt(12.5)
                 r_cycle.font.bold = True
                 if slate_rgb is not None:
                     r_cycle.font.color.rgb = slate_rgb
 
         # Determine whether to crop redundant pygraf caption/header block (variable, cycle, fhr)
-        is_cref = "composite" in title.lower() and "refl" in title.lower()
-        has_cycle_and_fhr = "cycle" in title_line2.lower() and bool(re.search(r"\bf\d+", title_line2, re.IGNORECASE))
-        should_crop_header = spec.get("crop_header", (is_cref and has_cycle_and_fhr))
+        # Default to True for all pygraf graphics to remove per-plot headers and maximize figure display
+        should_crop_header = spec.get("crop_header", True)
+        should_crop_colorbar = spec.get("crop_colorbar", True)
+
+        # Pre-scan figures on the slide to extract a shared colorbar if present
+        slide_colorbar = None
+        if should_crop_colorbar:
+            for r_items in rows_data:
+                for it in r_items:
+                    it_s = str(it).strip()
+                    if it_s.lower().startswith("obs"):
+                        continue
+                    cand_img = None
+                    if is_same_valid:
+                        exp_obj_p = resolve_experiment(it_s, plan.experiments)
+                        gn_p = spec.get("graphics name", "cref_full_sfc_f006.png")
+                        cn_p, _, fhr_p = parse_graphics_name(gn_p)
+                        if exp_obj_p and exp_obj_p.name:
+                            p1 = output_dir / "graphics" / exp_obj_p.name / f"{cycle}_{cn_p}"
+                            p2 = output_dir / "graphics" / exp_obj_p.name / f"{cycle}_{fhr_p:03d}_{cn_p}"
+                            cand_img = p1 if p1.is_file() else (p2 if p2.is_file() else None)
+                    else:
+                        exp_ref_p = spec.get("experiment", "first")
+                        exp_obj_p = resolve_experiment(exp_ref_p, plan.experiments)
+                        m_c_p = re.match(r"^(\d{10})_", it_s)
+                        rc_p = m_c_p.group(1) if m_c_p else cycle
+                        cn_p, _, fhr_p = parse_graphics_name(it_s)
+                        if exp_obj_p and exp_obj_p.name:
+                            p1 = output_dir / "graphics" / exp_obj_p.name / f"{rc_p}_{cn_p}"
+                            p2 = output_dir / "graphics" / exp_obj_p.name / f"{rc_p}_{fhr_p:03d}_{cn_p}"
+                            cand_img = p1 if p1.is_file() else (p2 if p2.is_file() else None)
+                    if cand_img and cand_img.is_file():
+                        try:
+                            with Image.open(cand_img) as im_p:
+                                cb_p = extract_pygraf_colorbar(im_p)
+                                if cb_p is not None:
+                                    slide_colorbar = cb_p
+                                    break
+                        except Exception:
+                            pass
+                if slide_colorbar is not None:
+                    break
+
+        if slide_colorbar is not None:
+            cb_h = int(avail_height * 0.85)
+            cb_w = max(1, int(cb_h * (slide_colorbar.width / slide_colorbar.height)))
+            cb_left = deck.slide_width - margin - cb_w
+            cb_top = content_top + (avail_height - cb_h) // 2
+            grid_avail_width = cb_left - margin - Inches(0.15)
+        else:
+            grid_avail_width = deck.slide_width - 2 * margin
 
         # Determine whether to show per-plot captions
         spec_caption_opt = spec.get("captions") if "captions" in spec else spec.get("caption")
@@ -1444,7 +1573,7 @@ def process_graphics_slides(
         for row_idx, row_items in enumerate(rows_data):
             row_top = content_top + row_idx * (row_height + row_gap)
             col_gap = Inches(0.15)
-            cell_width = (deck.slide_width - 2 * margin - col_gap * (len(row_items) - 1)) // len(row_items)
+            cell_width = (grid_avail_width - col_gap * (len(row_items) - 1)) // len(row_items)
             img_avail_h = row_height - caption_height - Inches(0.02) if show_captions else row_height
 
             for col_idx, item in enumerate(row_items):
@@ -1468,9 +1597,13 @@ def process_graphics_slides(
                     clean_name, tile_extracted, fhr = parse_graphics_name(g_name)
 
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{clean_name}"
                         if not (local_img.exists() and local_img.stat().st_size > 0):
-                            local_img = get_missing_placeholder(output_dir, clean_name)
+                            legacy_img = output_dir / "graphics" / exp_obj.name / f"{cycle}_{fhr:03d}_{clean_name}"
+                            if legacy_img.exists() and legacy_img.stat().st_size > 0:
+                                local_img = legacy_img
+                            else:
+                                local_img = get_missing_placeholder(output_dir, clean_name)
                     else:
                         if not exp_obj:
                             if item_str not in warned_unresolved_exps:
@@ -1495,12 +1628,16 @@ def process_graphics_slides(
                     m_item_cyc = re.match(r"^(\d{10})_", item_str)
                     row_cycle = m_item_cyc.group(1) if m_item_cyc else cycle
                     clean_name, tile_extracted, fhr = parse_graphics_name(item_str)
-                    caption_text = f"Cycle {row_cycle} F{fhr:03d}" if m_item_cyc else f"F{fhr:03d}"
+                    caption_text = f"Cycle: {row_cycle} F{fhr:03d}" if m_item_cyc else f"F{fhr:03d}"
 
                     if exp_obj and exp_obj.hpc_cluster and exp_obj.remote_comroot:
-                        local_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{fhr:03d}_{clean_name}"
+                        local_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{clean_name}"
                         if not (local_img.exists() and local_img.stat().st_size > 0):
-                            local_img = get_missing_placeholder(output_dir, clean_name)
+                            legacy_img = output_dir / "graphics" / exp_obj.name / f"{row_cycle}_{fhr:03d}_{clean_name}"
+                            if legacy_img.exists() and legacy_img.stat().st_size > 0:
+                                local_img = legacy_img
+                            else:
+                                local_img = get_missing_placeholder(output_dir, clean_name)
                     else:
                         if not exp_obj:
                             ref_key = str(exp_ref)
@@ -1523,8 +1660,13 @@ def process_graphics_slides(
                 # Measure and position image
                 try:
                     with Image.open(local_img) as im:
-                        if should_crop_header and not item_str.lower().startswith("obs"):
-                            cropped_im = crop_pygraf_header(im)
+                        if not item_str.lower().startswith("obs"):
+                            cropped_im = crop_pygraf_header(
+                                im,
+                                crop_colorbar=(should_crop_colorbar and slide_colorbar is not None),
+                            ) if should_crop_header else (
+                                crop_pygraf_header(im, crop_colorbar=True) if (should_crop_colorbar and slide_colorbar is not None) else im.copy()
+                            )
                         else:
                             cropped_im = im.copy()
                         pw, ph = cropped_im.size
@@ -1563,6 +1705,28 @@ def process_graphics_slides(
                     slide.shapes.add_picture(BytesIO(img_bytes), img_left, img_top, w, h)
                 except Exception as e:
                     _emit_warning(f"[!] Warning: Could not add picture '{local_img}': {e}")
+
+        # Add shared vertical colorbar on the right edge of the slide
+        if slide_colorbar is not None:
+            try:
+                cb_buf = BytesIO()
+                slide_colorbar.save(cb_buf, format="PNG")
+                cb_buf.seek(0)
+                slide.shapes.add_picture(cb_buf, cb_left, cb_top, cb_w, cb_h)
+
+                # Add a neat "dBZ" label centered above the rotated colorbar
+                tb = slide.shapes.add_textbox(cb_left - Inches(0.10), cb_top - Inches(0.35), cb_w + Inches(0.20), Inches(0.30))
+                tb_tf = tb.text_frame
+                tb_tf.margin_left = tb_tf.margin_right = tb_tf.margin_top = tb_tf.margin_bottom = 0
+                tb_p = tb_tf.paragraphs[0]
+                tb_p.text = "dBZ"
+                tb_p.font.size = Pt(11)
+                tb_p.font.bold = True
+                tb_p.alignment = PP_ALIGN.CENTER
+                if slate_rgb is not None:
+                    tb_p.font.color.rgb = slate_rgb
+            except Exception as e:
+                _emit_warning(f"[!] Warning: Could not place shared colorbar: {e}")
 
         added_count += 1
 

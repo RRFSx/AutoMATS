@@ -1,0 +1,84 @@
+#  pygraf layout for May2024 baseline retros
+#
+# 20240508_00  NE
+# 20240508_22  SE
+# 20240510_11  SE
+#
+
+pygraf slides:
+# compare different experiments ============================================================================================
+# -- valid time = 20240508_00z, f001, f003
+- type: same cycle same fhr
+  title: Composite Reflectivity
+  WGF: det
+  graphics name: cref_NE_sfc_f001.png
+  cycle: 2024050723
+  number of rows: 2
+  row1: [first, second]
+  row2: [obs]
+
+- type: same cycle same fhr
+  title: Composite Reflectivity
+  WGF: det
+  graphics name: cref_NE_sfc_f003.png
+  cycle: 2024050720
+  number of rows: 2
+  row1: [first, second]
+  row2: [obs]
+
+# -- valid time = 20240508_22z, f001, f003
+- type: same cycle same fhr
+  title: Composite Reflectivity
+  WGF: det
+  graphics name: cref_SE_sfc_f001.png
+  cycle: 2024050821
+  number of rows: 2
+  row1: [first, second]
+  row2: [obs]
+
+- type: same cycle same fhr
+  title: Composite Reflectivity
+  WGF: det
+  graphics name: cref_SE_sfc_f003.png
+  cycle: 2024050819
+  number of rows: 2
+  row1: [first, second]
+  row2: [obs]
+
+# -- valid time = 20240510_11z, f001, f003
+- type: same cycle same fhr
+  title: Composite Reflectivity
+  WGF: det
+  graphics name: cref_SE_sfc_f001.png
+  cycle: 2024051010
+  number of rows: 2
+  row1: [first, second]
+  row2: [obs]
+
+- type: same cycle same fhr
+  title: Composite Reflectivity
+  WGF: det
+  graphics name: cref_SE_sfc_f003.png
+  cycle: 2024051008
+  number of rows: 2
+  row1: [first, second]
+  row2: [obs]
+
+# time evolution with different fhr for the same experiment =================================================================
+- type: same cycle different fhr
+  title: Composite Reflectivity
+  WGF: det
+  experiment: second
+  cycle: 2024050700
+  number of rows: 2
+  row1: [cref_full_sfc_f001.pg, obs]
+  row2: [cref_full_sfc_f002.pg, obs]
+
+# performance of different forecast lead times for the same experiment=======================================================
+- type: different cycle same valid time
+  title: Composite Reflectivity
+  WGF: det
+  experiment: second
+  number of rows: 2
+  row1: [2024051010_cref_full_sfc_f001.pg, obs]
+  row2: [2024051009_cref_full_sfc_f002.pg, obs]

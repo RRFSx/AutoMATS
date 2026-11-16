@@ -30,7 +30,7 @@ plots:
   forecast lead time: [0]
   Difference curves: "Diff all curves against the 1st added curve"
 
-#- name: roab_profile
+#- name: raob_profile
 #  application: "Upper Air"
 #  plot_type: profile
 #  truth: "RAOBs (Traditional)"

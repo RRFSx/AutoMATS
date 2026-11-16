@@ -69,7 +69,7 @@ plots:
   forecast lead time: [0, 1, 12, 24]
   #Difference curves: "Diff all curves against the 1st added curve"
 
-- name: ROAB_dieoff
+- name: RAOB_dieoff
   application: "Upper Air"
   plot_type: dieoff
   truth: "RAOBs (Traditional)"
@@ -79,7 +79,7 @@ plots:
   variable: [T, RHobT, Wind]
   statistic: [rmse+bias]
 
-- name: ROAB_profile
+- name: RAOB_profile
   application: "Upper Air"
   plot_type: profile
   truth: "RAOBs (Traditional)"
@@ -90,7 +90,7 @@ plots:
   statistic: [rmse+bias]
   forecast lead time: [0, 1, 3, 6, 12, 24]
 
-- name: ROAB_tseries
+- name: RAOB_tseries
   application: "Upper Air"
   plot_type: "time series"
   truth: "RAOBs (Traditional)"
@@ -211,57 +211,57 @@ slides:
 
 # T profile
 - plot group: RAOB_profile
-  title: T ROAB Profile f000, f001
+  title: T RAOB Profile f000, f001
   number of rows: 2
   row1: [f000_allz, f000_0z, f000_12z]
   row2: [f001_allz, f001_0z, f001_12z]
 
 - plot group: RAOB_profile
-  title: T ROAB Profile f003, f006
+  title: T RAOB Profile f003, f006
   number of rows: 2
   row1: [f003_allz, f003_0z, f003_12z]
   row2: [f006_allz, f006_0z, f006_12z]
 
 - plot group: RAOB_profile
-  title: T ROAB Profile f012, f024
+  title: T RAOB Profile f012, f024
   number of rows: 2
   row1: [f012_allz, f012_0z, f012_12z]
   row2: [f024_allz, f024_0z, f024_12z]
 
 # RHobT profile
 - plot group: RAOB_profile
-  title: RHobT ROAB Profile f000, f001
+  title: RHobT RAOB Profile f000, f001
   number of rows: 2
   row1: [f000_allz, f000_0z, f000_12z]
   row2: [f001_allz, f001_0z, f001_12z]
 
 - plot group: RAOB_profile
-  title: RHobT ROAB Profile f003, f006
+  title: RHobT RAOB Profile f003, f006
   number of rows: 2
   row1: [f003_allz, f003_0z, f003_12z]
   row2: [f006_allz, f006_0z, f006_12z]
 
 - plot group: RAOB_profile
-  title: RHobT ROAB Profile f012, f024
+  title: RHobT RAOB Profile f012, f024
   number of rows: 2
   row1: [f012_allz, f012_0z, f012_12z]
   row2: [f024_allz, f024_0z, f024_12z]
 
 # Wind profile
 - plot group: RAOB_profile
-  title: Wind ROAB Profile f000, f001
+  title: Wind RAOB Profile f000, f001
   number of rows: 2
   row1: [f000_allz, f000_0z, f000_12z]
   row2: [f001_allz, f001_0z, f001_12z]
 
 - plot group: RAOB_profile
-  title: Wind ROAB Profile f003, f006
+  title: Wind RAOB Profile f003, f006
   number of rows: 2
   row1: [f003_allz, f003_0z, f003_12z]
   row2: [f006_allz, f006_0z, f006_12z]
 
 - plot group: RAOB_profile
-  title: Wind ROAB Profile f012, f024
+  title: Wind RAOB Profile f012, f024
   number of rows: 2
   row1: [f012_allz, f012_0z, f012_12z]
   row2: [f024_allz, f024_0z, f024_12z]
@@ -274,7 +274,7 @@ slides:
   row2: [f003]
 
 - plot group: RAOB_tseries
-  title: T ROAB Time Series RMSE+Bias
+  title: T RAOB Time Series RMSE+Bias
   number of rows: 2
   row1: [f006, f012]
   row2: [f024]

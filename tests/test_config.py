@@ -934,7 +934,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(title_contains_variable("T RAOB Dieoff"))
         self.assertTrue(title_contains_variable("RHobT RAOB Dieoff"))
         self.assertTrue(title_contains_variable("Wind RAOB Dieoff"))
-        self.assertTrue(title_contains_variable("T ROAB Profile f000, f001"))
+        self.assertTrue(title_contains_variable("T RAOB Profile f000, f001"))
         self.assertTrue(title_contains_variable("RADAR MRMS Dieoff CSI and Bias"))
         self.assertTrue(title_contains_variable("Ceiling Dieoff CSI and Bias"))
         self.assertTrue(title_contains_variable("Visibility Dieoff CSI and Bias"))
@@ -959,7 +959,7 @@ class ConfigTests(unittest.TestCase):
     def test_profile_slides_label_valid_utc_hours(self):
         raw = example()
         raw["plots"] = [{
-            "name": "ROAB_profile",
+            "name": "RAOB_profile",
             "application": "Upper Air",
             "plot_type": "profile",
             "truth": "RAOBs (Traditional)",
@@ -971,8 +971,8 @@ class ConfigTests(unittest.TestCase):
             "Valid UTC Hour": ["allz", "0z", "12z"],
         }]
         raw["slides"] = [{
-            "plot group": "ROAB_profile",
-            "title": "T ROAB Profile f000, f001",
+            "plot group": "RAOB_profile",
+            "title": "T RAOB Profile f000, f001",
             "number of rows": 2,
             "row1": ["f000_allz", "f000_0z", "f000_12z"],
             "row2": ["f001_allz", "f001_0z", "f001_12z"],

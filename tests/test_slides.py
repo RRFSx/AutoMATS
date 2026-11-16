@@ -704,13 +704,13 @@ class SlideDeduplicationHelpersTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp = Path(tmp_dir)
-            img_path = tmp / "ROAB_profile_T_rmse+bias_f000_allz.png"
+            img_path = tmp / "RAOB_profile_T_rmse+bias_f000_allz.png"
             im = Image.new("RGB", (100, 100), color="white")
             im.save(img_path, format="PNG")
 
             slide_var = SlideSpec(
-                plot_group="ROAB_profile",
-                title="T ROAB Profile f000, f001",
+                plot_group="RAOB_profile",
+                title="T RAOB Profile f000, f001",
                 rows=((img_path.name,),),
                 captions=(("allz",),),
             )
@@ -729,13 +729,13 @@ class SlideDeduplicationHelpersTests(unittest.TestCase):
             )
             dest = build_slides(plan, tmp)
             prs = Presentation(dest)
-            # Slide 0 is overview, Slide 1 is T ROAB Profile, Slide 2 is Surface Dieoff
+            # Slide 0 is overview, Slide 1 is T RAOB Profile, Slide 2 is Surface Dieoff
             s1 = prs.slides[1]
-            title_p1 = [s for s in s1.shapes if s.has_text_frame and s.text_frame.text == "T ROAB Profile f000, f001"][0].text_frame.paragraphs[0]
+            title_p1 = [s for s in s1.shapes if s.has_text_frame and s.text_frame.text == "T RAOB Profile f000, f001"][0].text_frame.paragraphs[0]
             self.assertEqual(len(title_p1.runs), 2)
             self.assertEqual(title_p1.runs[0].text, "T")
             self.assertEqual(title_p1.runs[0].font.color.rgb, RGBColor(0, 0, 255))
-            self.assertEqual(title_p1.runs[1].text, " ROAB Profile f000, f001")
+            self.assertEqual(title_p1.runs[1].text, " RAOB Profile f000, f001")
             self.assertIsNone(title_p1.runs[1].font.color.type)
 
             captions_s1 = [s.text_frame.text for s in s1.shapes if s.name.startswith("Caption ")]

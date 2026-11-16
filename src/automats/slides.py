@@ -1389,6 +1389,16 @@ def build_slides(
             row_items: List[Dict[str, Any]] = []
             for column, relative_path in enumerate(row):
                 path = output / relative_path
+                alt_rel = None
+                if not path.is_file():
+                    for target, rep in (("RAOB", "ROAB"), ("raob", "roab"), ("ROAB", "RAOB"), ("roab", "raob")):
+                        if target in relative_path:
+                            cand_rel = relative_path.replace(target, rep)
+                            cand_path = output / cand_rel
+                            if cand_path.is_file():
+                                path = cand_path
+                                alt_rel = cand_rel
+                                break
                 is_placeholder = False
                 try:
                     data = path.read_bytes()
@@ -1417,7 +1427,7 @@ def build_slides(
                         height=ph_h,
                     )
 
-                record = None if is_placeholder else store_records.get(relative_path)
+                record = None if is_placeholder else (store_records.get(relative_path) or (store_records.get(alt_rel) if alt_rel else None))
                 fig_meta = None
                 if not is_placeholder:
                     if isinstance(record, dict):

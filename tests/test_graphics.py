@@ -1151,11 +1151,11 @@ class BaselineC6Tests(unittest.TestCase):
 
             data = yaml.safe_load(tmp_recipe.read_text(encoding="utf-8"))
             self.assertEqual(len(data["experiments"]), 2)
-            self.assertEqual(data["experiments"][0]["MATS name"], "RRFSv2_conus_3km_ret_v2x_retv4")
+            self.assertEqual(data["experiments"][0]["MATS name"], baselinec6.BASELINE_EXPERIMENT)
             self.assertEqual(data["experiments"][0]["short name"], baselinec6.BASELINE_SHORT_NAME)
             self.assertEqual(
                 data["experiments"][0]["COMROOT"],
-                "gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4",
+                baselinec6.resolve_comroot(baselinec6.BASELINE_HPC_DIR),
             )
             self.assertEqual(data["experiments"][1]["MATS name"], "my_mats_exp")
             self.assertEqual(data["experiments"][1]["short name"], "my_short")
@@ -1305,11 +1305,11 @@ class BaselineC6Tests(unittest.TestCase):
                 data1 = yaml.safe_load(Path(captured["args"][0]).read_text(encoding="utf-8"))
 
             self.assertEqual(rc1, 0)
-            self.assertEqual(data1["experiments"][0]["short name"], "base4")
+            self.assertEqual(data1["experiments"][0]["short name"], baselinec6.BASELINE_SHORT_NAME)
             self.assertEqual(data1["experiments"][1]["short name"], "other_s")
             self.assertEqual(
                 data1["experiments"][0]["COMROOT"],
-                "gaeac6:/gpfs/f6/bil-fire10-oar/world-shared/jjh/rrfsv2/RRFSv2X/L60/OPSROOT/RRFSv2X.retv4/com/rrfs/v2.1.4",
+                baselinec6.resolve_comroot(baselinec6.BASELINE_HPC_DIR),
             )
             self.assertNotIn("COMROOT", data1["experiments"][1])
             self.assertTrue(data1["pygraf slides"]["enable"])

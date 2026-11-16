@@ -92,8 +92,8 @@ Add `slides` to a recipe to build a 16:9 PowerPoint deck at
 
 ```yaml
 slides:
-- plot group: ua_dieoff
-  title: Upper Air Verification
+- plot group: RAOB_dieoff
+  title: ROAB Verification
   number of rows: 2
   row1: [T, RHobT]
   row2: [Wind]
